@@ -1,0 +1,20 @@
+# Gradle / Android
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/captures
+local.properties
+*.apk
+*.aab
+*.keystore
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+firmware/.pio/
