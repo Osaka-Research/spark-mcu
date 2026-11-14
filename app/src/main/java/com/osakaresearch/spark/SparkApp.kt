@@ -3,6 +3,7 @@ package com.osakaresearch.spark
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
@@ -23,6 +24,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.osakaresearch.spark.ui.ControlScreen
+import com.osakaresearch.spark.ui.FirmwareScreen
 import com.osakaresearch.spark.ui.MonitorScreen
 import com.osakaresearch.spark.ui.ScanScreen
 
@@ -40,9 +42,10 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
     data object Scan : Tab("scan", "Scan", Icons.Outlined.Radar)
     data object Control : Tab("control", "Control", Icons.Outlined.Bolt)
     data object Monitor : Tab("monitor", "Monitor", Icons.Outlined.Terminal)
+    data object Firmware : Tab("firmware", "Firmware", Icons.Outlined.Memory)
 }
 
-private val Tabs = listOf(Tab.Scan, Tab.Control, Tab.Monitor)
+private val Tabs = listOf(Tab.Scan, Tab.Control, Tab.Monitor, Tab.Firmware)
 
 @Composable
 fun SparkApp() {
@@ -82,6 +85,7 @@ fun SparkApp() {
                 composable(Tab.Scan.route) { ScanScreen() }
                 composable(Tab.Control.route) { ControlScreen() }
                 composable(Tab.Monitor.route) { MonitorScreen() }
+                composable(Tab.Firmware.route) { FirmwareScreen() }
             }
         }
     }

@@ -10,10 +10,16 @@
   #include <WiFi.h>
   #include <ESPmDNS.h>
   #include <ESP32Servo.h>
+  #include <WebServer.h>
+  #include <Update.h>
+  static WebServer httpd(80);
 #else
   #include <ESP8266WiFi.h>
   #include <ESP8266mDNS.h>
   #include <Servo.h>
+  #include <ESP8266WebServer.h>
+  #include <Updater.h>
+  static ESP8266WebServer httpd(80);
 #endif
 
 static WebSocketsServer ws(81);
@@ -198,10 +204,61 @@ void setup() {
 
     if (MDNS.begin(g_hostname.c_str())) {
         MDNS.addService("spark", "tcp", 81);
+        MDNS.addService("http", "tcp", 80);
     }
 
     ws.begin();
     ws.onEvent(onWsEvent);
+
+    httpd.on("/", HTTP_GET, []() {
+        String info = "spark-mcu " + g_hostname + "\nPOST firmware .bin to /ota\n";
+        httpd.send(200, "text/plain", info);
+    });
+    httpd.on("/ota", HTTP_POST,
+        []() {
+            bool ok = !Update.hasError();
+            httpd.sendHeader("Connection", "close");
+            httpd.send(200, "application/json",
+                ok ? "{\"evt\":\"ota\",\"ok\":true}" : "{\"evt\":\"ota\",\"ok\":false}");
+            if (ok) {
+                delay(200);
+                ESP.restart();
+            }
+        },
+        []() {
+            HTTPUpload& up = httpd.upload();
+            if (up.status == UPLOAD_FILE_START) {
+                JsonDocument d;
+                d["evt"] = "ota";
+                d["phase"] = "start";
+                d["name"] = up.filename;
+                broadcastJson(d);
+#if defined(SPARK_BOARD_ESP32)
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Update.printError(Serial);
+                }
+#else
+                WiFiUDP::stopAll();
+                uint32_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+                if (!Update.begin(maxSketch)) {
+                    Update.printError(Serial);
+                }
+#endif
+            } else if (up.status == UPLOAD_FILE_WRITE) {
+                if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+                    Update.printError(Serial);
+                }
+            } else if (up.status == UPLOAD_FILE_END) {
+                bool ok = Update.end(true);
+                JsonDocument d;
+                d["evt"] = "ota";
+                d["phase"] = "end";
+                d["ok"] = ok;
+                d["bytes"] = (uint32_t)up.totalSize;
+                broadcastJson(d);
+            }
+        });
+    httpd.begin();
 
     Serial.printf("spark-mcu up at %s (%s), ws port 81\n",
                   g_hostname.c_str(),
@@ -210,6 +267,7 @@ void setup() {
 
 void loop() {
     ws.loop();
+    httpd.handleClient();
 #if !defined(SPARK_BOARD_ESP32)
     MDNS.update();
 #endif

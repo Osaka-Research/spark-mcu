@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- CH340 / CH341 (QinHeng) - the chip on classic NodeMCU v2 and many ESP32 clones -->
+    <usb-device vendor-id="6790" product-id="29987" />
+    <!-- CH343 -->
+    <usb-device vendor-id="6790" product-id="21795" />
+
+    <!-- CP2102 / CP2104 (Silicon Labs) - NodeMCU v3, ESP32 DevKitC -->
+    <usb-device vendor-id="4292" product-id="60000" />
+    <usb-device vendor-id="4292" product-id="60001" />
+    <usb-device vendor-id="4292" product-id="60016" />
+    <usb-device vendor-id="4292" product-id="60017" />
+
+    <!-- FTDI FT232 - older ESP boards, Arduinos -->
+    <usb-device vendor-id="1027" product-id="24577" />
+    <usb-device vendor-id="1027" product-id="24592" />
+
+    <!-- Espressif native USB (ESP32-S2, S3, C3, C6 built-in USB) -->
+    <usb-device vendor-id="12346" product-id="4097" />
+    <usb-device vendor-id="12346" product-id="4098" />
+
+    <!-- Prolific PL2303 - some generic cables -->
+    <usb-device vendor-id="1659" product-id="8963" />
+</resources>
