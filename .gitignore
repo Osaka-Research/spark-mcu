@@ -18,3 +18,16 @@ local.properties
 .piolibdeps/
 .vscode/
 firmware/.pio/
+
+# Bootstrap toolchain scaffolding — never commit extracted binaries
+firmware/bootstrap/.work/
+firmware/bootstrap/out/
+firmware/bootstrap/*.apk
+
+# Toolchain fetched at build time — reconstituted from a GH release,
+# so there's no reason to track the binaries in-repo.
+app/src/main/jniLibs/
+app/src/main/assets/toolchain/
+
+# Kotlin daemon scratch
+.kotlin/

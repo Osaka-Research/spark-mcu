@@ -2,19 +2,23 @@ package com.osakaresearch.spark.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -22,7 +26,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.widget.Toast
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -33,6 +42,8 @@ import com.osakaresearch.spark.net.SparkClient
 fun MonitorScreen() {
     var lines by remember { mutableStateOf(listOf("spark monitor ready. connect from the Scan tab.")) }
     val listState = rememberLazyListState()
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         SparkClient.incoming.collect { msg ->
@@ -67,17 +78,44 @@ fun MonitorScreen() {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             shape = RoundedCornerShape(12.dp),
         ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                items(lines) { line ->
+            Column(Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        line,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
+                        "Log",
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
                     )
+                    OutlinedButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(lines.joinToString("\n")))
+                        },
+                    ) { Text("Copy") }
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val path = LogExport.save(context, "monitor", lines.joinToString("\n"))
+                            Toast.makeText(
+                                context,
+                                if (path != null) "saved to $path" else "save failed",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                    ) { Text("Save") }
+                }
+                Spacer(Modifier.height(8.dp))
+                SelectionContainer {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        items(lines) { line ->
+                            Text(
+                                line,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
                 }
             }
         }
