@@ -62,6 +62,7 @@ object UsbFlasher {
         offset: Int,
         onProgress: (Long, Long) -> Unit,
         onLog: (String) -> Unit,
+        manualBoot: Boolean = false,
     ): FlashResult = withContext(Dispatchers.IO) {
         val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager).firstOrNull()
@@ -88,15 +89,22 @@ object UsbFlasher {
             if (firmware.isEmpty()) return@withContext FlashResult.Fail("empty firmware file")
             onLog("firmware: ${firmware.size} bytes @ offset 0x${Integer.toHexString(offset)}")
 
-            onLog("resetting chip into bootloader ...")
-            classicReset(port)
+            if (manualBoot) {
+                // Skip auto-reset: user has already driven GPIO0/EN manually
+                // (e.g. hold FLASH + tap RST). Toggling DTR/RTS now would
+                // bounce the chip back out of the bootROM download mode.
+                onLog("manual boot mode: skipping DTR/RTS reset pulse")
+            } else {
+                onLog("resetting chip into bootloader ...")
+                classicReset(port)
+            }
 
             onLog("SYNC ...")
             var synced = false
             for (attempt in 1..SYNC_ATTEMPTS) {
                 if (trySync(port)) { synced = true; break }
                 onLog("  sync attempt $attempt failed")
-                classicReset(port)
+                if (!manualBoot) classicReset(port)
             }
             if (!synced) return@withContext FlashResult.Fail("chip did not respond to SYNC")
             onLog("sync ok")

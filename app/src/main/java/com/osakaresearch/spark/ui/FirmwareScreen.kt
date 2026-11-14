@@ -29,6 +29,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -71,7 +72,9 @@ fun FirmwareScreen() {
 
     var hostOverride by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("80") }
-    var offsetHex by remember { mutableStateOf("0x10000") }
+    // 0x0 because the on-device build now emits a full eboot + app image (via
+    // Elf2Image). The old 0x10000 default was for raw esptool-style app bins.
+    var offsetHex by remember { mutableStateOf("0x0") }
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var selectedName by remember { mutableStateOf("") }
     var progress by remember { mutableFloatStateOf(0f) }
@@ -79,6 +82,7 @@ fun FirmwareScreen() {
     var uploading by remember { mutableStateOf(false) }
     var usbDevices by remember { mutableStateOf<List<UsbDeviceInfo>>(emptyList()) }
     var usbRefreshTick by remember { mutableIntStateOf(0) }
+    var manualBoot by remember { mutableStateOf(false) }
     var building by remember { mutableStateOf(false) }
 
     LaunchedEffect(connState) {
@@ -96,7 +100,7 @@ fun FirmwareScreen() {
     }
 
     val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
+        OpenDocumentInDownloads()
     ) { uri ->
         if (uri != null) {
             selectedUri = uri
@@ -146,6 +150,8 @@ fun FirmwareScreen() {
                 offsetHex = offsetHex,
                 onOffset = { offsetHex = it },
                 onRefresh = { usbRefreshTick++ },
+                manualBoot = manualBoot,
+                onManualBoot = { manualBoot = it },
             )
         }
 
@@ -212,6 +218,7 @@ fun FirmwareScreen() {
                                                 progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
                                             },
                                             onLog = { line -> log = log + line },
+                                            manualBoot = manualBoot,
                                         )
                                         uploading = false
                                         log = log + when (result) {
@@ -270,6 +277,20 @@ fun FirmwareScreen() {
                                 is SketchBuilder.Result.Fail ->
                                     "failed: ${result.reason}"
                             }
+                            // Persist the fresh bin to Downloads/ so it survives the
+                            // next build's work-dir wipe, and auto-select it for flashing.
+                            if (result is SketchBuilder.Result.Ok) {
+                                val exported = BinExport.save(context, "blink", result.output.readBytes())
+                                if (exported != null) {
+                                    selectedUri = exported.uri
+                                    selectedName = exported.displayName
+                                    log = log + "saved: ${exported.humanPath}"
+                                } else {
+                                    log = log + "bin export failed"
+                                }
+                                val elfExport = BinExport.saveAs(context, "blink", "elf", result.elf.readBytes())
+                                log = log + (elfExport?.let { "saved: ${it.humanPath}" } ?: "elf export failed")
+                            }
                             building = false
                         }
                     },
@@ -325,6 +346,24 @@ fun FirmwareScreen() {
     }
 }
 
+/**
+ * [ActivityResultContracts.OpenDocument] variant that hints the system picker to
+ * open rooted at Downloads/. The hint is honoured on API 26+ picker UIs that
+ * respect [android.provider.DocumentsContract.EXTRA_INITIAL_URI]; older pickers
+ * ignore it and fall back to their own default root.
+ */
+private class OpenDocumentInDownloads : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: android.content.Context, input: Array<String>): android.content.Intent {
+        val intent = super.createIntent(context, input)
+        val downloadsUri = android.provider.DocumentsContract.buildRootUri(
+            "com.android.providers.downloads.documents",
+            "downloads",
+        )
+        intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, downloadsUri)
+        return intent
+    }
+}
+
 private val BLINK_INO = """
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -376,6 +415,8 @@ private fun UsbTarget(
     offsetHex: String,
     onOffset: (String) -> Unit,
     onRefresh: () -> Unit,
+    manualBoot: Boolean,
+    onManualBoot: (Boolean) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -415,6 +456,42 @@ private fun UsbTarget(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             )
+
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Manual boot mode", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(
+                        "Skips DTR/RTS auto-reset. Use when your board has no auto-reset circuit.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    )
+                }
+                Switch(checked = manualBoot, onCheckedChange = onManualBoot)
+            }
+
+            if (manualBoot) {
+                Spacer(Modifier.height(10.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("Enter download mode:", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "1.  Hold  FLASH\n" +
+                                "2.  Tap  RST  (keep holding FLASH)\n" +
+                                "3.  Release  FLASH\n" +
+                                "4.  Within ~3 s, tap  Flash  below.",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            }
         }
     }
 }

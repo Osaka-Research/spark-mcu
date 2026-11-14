@@ -32,7 +32,13 @@ object Elf2Image {
      * nodemcu's 4M flash / 40 MHz / QIO configuration — the same as BuildFlags.
      */
     data class FlashParams(
-        val mode: Int = 0,     // qio
+        // DIO is the lowest-common-denominator SPI mode that every ESP8266
+        // module can read. QIO is ~30% faster but needs the flash chip to
+        // support quad reads AND the WP/HOLD pads to be strapped — many
+        // modern ESP-12E/F variants (PUYA, newer Winbond) only read
+        // reliably as DIO. A QIO/DIO mismatch produces a "Fatal exception
+        // (0): epc1=0x40202x" boot loop (chip executes garbage from flash).
+        val mode: Int = 2,     // dio
         val sizeMb: Int = 4,   // 4MB → encoded as nibble 4
         val freqMhz: Int = 40, // 40 MHz → encoded as nibble 0
     ) {

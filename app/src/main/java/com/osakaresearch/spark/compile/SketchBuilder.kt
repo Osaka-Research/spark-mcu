@@ -22,7 +22,7 @@ import java.io.File
 object SketchBuilder {
 
     sealed class Result {
-        data class Ok(val output: File, val log: String) : Result()
+        data class Ok(val output: File, val elf: File, val log: String) : Result()
         data class Fail(val reason: String, val log: String) : Result()
     }
 
@@ -117,6 +117,12 @@ object SketchBuilder {
 
             log("built ${elf.name} (${elf.length()} bytes)")
 
+            // Symbol dump — maps boot-time crash PCs (e.g. "epc1=0x402020ec")
+            // to the function that owns the address. Cheap to compute and has
+            // repeatedly been the fastest way to localise ESP8266 boot crashes.
+            runCatching { logKeySymbols(elf, ::log) }
+                .onFailure { log("symtab: skipped (${it.message})") }
+
             // 6. elf → firmware.bin (eboot + app)
             log("elf2image: firmware.bin")
             val bin = File(work, "firmware.bin")
@@ -130,7 +136,7 @@ object SketchBuilder {
             bin.writeBytes(bytes)
             log("built ${bin.name} (${bin.length()} bytes)")
 
-            Result.Ok(bin, logBuf.toString())
+            Result.Ok(bin, elf, logBuf.toString())
         } catch (t: Throwable) {
             Result.Fail(t.message ?: t::class.simpleName.orEmpty(), logBuf.toString())
         }
@@ -176,8 +182,30 @@ object SketchBuilder {
         when {
             exit != 0 -> Result.Fail("gcc exited with $exit", output)
             !obj.exists() -> Result.Fail("gcc succeeded but no .o produced", output)
-            else -> Result.Ok(obj, output)
+            else -> Result.Ok(obj, obj, output)
         }
+    }
+
+    /**
+     * Logs the symbols the eboot boot flow actually cares about, plus the
+     * function nearest to a canary PC in `.irom0.text`. Everything is sorted
+     * by address so a reader can eyeball where the IRAM .text ends and
+     * `.irom0.text` begins.
+     */
+    private fun logKeySymbols(elf: File, log: (String) -> Unit) {
+        val syms = ElfInspect.functionSymbols(elf)
+        log("symtab: ${syms.size} function symbols")
+        for (name in listOf("app_entry", "app_entry_redefinable", "call_user_start", "setup", "loop")) {
+            val s = ElfInspect.find(syms, name)
+            if (s != null) log("  ${name} @ 0x${s.addr.toString(16)} (size=${s.size})")
+            else log("  ${name}: <unresolved>")
+        }
+        // Dump the first few flash-mapped functions so we can eyeball what
+        // sits right after the CRC placeholders / .ver_number header.
+        val iromStart = 0x40201000L
+        val irom = syms.filter { it.addr >= iromStart }.take(6)
+        if (irom.isNotEmpty()) log("  first .irom0.text funcs:")
+        for (s in irom) log("    0x${s.addr.toString(16)} ${s.name}")
     }
 
     /**
