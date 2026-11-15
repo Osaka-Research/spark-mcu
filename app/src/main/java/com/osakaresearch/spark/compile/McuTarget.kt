@@ -1,5 +1,7 @@
 package com.osakaresearch.spark.compile
 
+import android.content.Context
+
 /**
  * The compile + flash pipeline is MCU-family-specific: toolchain prefix,
  * Arduino core, LD scripts, image layout, and flasher protocol all differ
@@ -41,7 +43,7 @@ enum class McuTarget(
     ESP32_S3(
         id = "esp32-s3",
         label = "ESP32-S3",
-        detail = "xtensa-esp32s3 · needs toolchain + arduino-esp32 core (not yet bundled)",
+        detail = "xtensa-esp32s3 · app image at 0x10000",
         available = false,
         toolchainTriple = "xtensa-esp32s3-elf",
         gccVer = "13.2.0",
@@ -51,6 +53,12 @@ enum class McuTarget(
     ;
 
     val toolchainAssetSubdir: String get() = "toolchain/$toolchainTriple"
+
+    fun isAvailable(ctx: Context): Boolean = when (this) {
+        ESP8266_NODEMCU -> true
+        ESP32_S3 -> ctx.assets.list("toolchain/arduino-core-esp32").orEmpty().isNotEmpty() &&
+            ctx.assets.list(toolchainAssetSubdir).orEmpty().isNotEmpty()
+    }
 
     companion object {
         val Default: McuTarget = ESP8266_NODEMCU

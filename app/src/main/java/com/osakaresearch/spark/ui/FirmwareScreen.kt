@@ -194,16 +194,22 @@ fun FirmwareScreen() {
             McuTarget.values().forEachIndexed { i, t ->
                 SegmentedButton(
                     selected = target == t,
-                    onClick = { if (!building && !uploading) target = t },
+                    onClick = {
+                        if (!building && !uploading && target != t) {
+                            target = t
+                            offsetHex = if (t == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                        }
+                    },
                     shape = SegmentedButtonDefaults.itemShape(i, McuTarget.values().size),
                 ) { Text(t.label) }
             }
         }
         Text(
-            target.detail,
+            if (target.isAvailable(context)) target.detail
+            else "${target.detail} · on-device compiler assets not bundled",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(
-                alpha = if (target.available) 0.6f else 0.9f,
+                alpha = if (target.isAvailable(context)) 0.6f else 0.9f,
             ),
         )
 
@@ -424,10 +430,9 @@ fun FirmwareScreen() {
             }
         }
 
-        // Compile card hidden for targets with no on-device toolchain yet —
-        // S3 users should use the precompiled-blink card above instead of
-        // tapping a Compile button that always fails.
-        if (target.available) {
+        // The S3 build card appears once the optional compiler and core assets
+        // have been packaged into this APK.
+        if (target.isAvailable(context)) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -437,7 +442,10 @@ fun FirmwareScreen() {
                     Text("Sketch · on-device build", fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
+                        if (target == McuTarget.ESP32_S3)
+                            "Compile an .ino for ESP32-S3. The app image flashes at 0x10000; install the bootloader and partition images with the four-file flasher first."
+                        else
+                            "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     )

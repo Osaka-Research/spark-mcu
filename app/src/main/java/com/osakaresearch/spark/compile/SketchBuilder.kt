@@ -38,6 +38,9 @@ object SketchBuilder {
         target: McuTarget = McuTarget.Default,
         onLog: (String) -> Unit = {},
     ): Result = withContext(Dispatchers.IO) {
+        if (target == McuTarget.ESP32_S3) {
+            return@withContext S3SketchBuilder.buildSketch(ctx, inoFile, onLog)
+        }
         val logBuf = StringBuilder()
         fun log(line: String) { onLog(line); logBuf.appendLine(line) }
 
@@ -323,7 +326,7 @@ object SketchBuilder {
      * linked alongside it, and the include dirs to add to `-I` so cross-file
      * `#include "foo.h"` resolves.
      */
-    private data class SketchSources(
+    internal data class SketchSources(
         val mergedIno: File,
         val inoCount: Int,
         val extraSources: List<File>,
@@ -346,7 +349,7 @@ object SketchBuilder {
      * in a follow-up. For sketches that declare helpers before using them
      * (or declare prototypes explicitly), this is sufficient.
      */
-    private fun preprocessSketch(primaryIno: File, workDir: File): SketchSources {
+    internal fun preprocessSketch(primaryIno: File, workDir: File): SketchSources {
         val sketchDir = primaryIno.parentFile ?: workDir
 
         // All .ino files in the sketch dir (top level only). Primary first,
@@ -432,7 +435,7 @@ object SketchBuilder {
         }
     }
 
-    private fun runProcess(
+    internal fun runProcess(
         cmd: List<String>,
         workDir: File,
         binDir: File,
