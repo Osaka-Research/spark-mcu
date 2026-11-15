@@ -124,10 +124,14 @@ static void handleCommand(uint8_t num, const String& payload) {
     } else if (strcmp(cmd, "motor") == 0) {
         // Two-motor H-bridge convention:
         // ESP32: L_IN1=16, L_IN2=17, L_PWM=18; R_IN1=19, R_IN2=21, R_PWM=22
+        // ESP32-S3: L_IN1=4, L_IN2=5, L_PWM=6; R_IN1=7, R_IN2=15, R_PWM=16
         // ESP8266: L_IN1=D1, L_IN2=D2, L_PWM=D5; R_IN1=D6, R_IN2=D7, R_PWM=D8
         int left = doc["left"] | 0;
         int right = doc["right"] | 0;
-#if defined(SPARK_BOARD_ESP32)
+#if defined(SPARK_BOARD_ESP32_S3)
+        const int L_IN1 = 4, L_IN2 = 5, L_PWM = 6;
+        const int R_IN1 = 7, R_IN2 = 15, R_PWM = 16;
+#elif defined(SPARK_BOARD_ESP32)
         const int L_IN1 = 16, L_IN2 = 17, L_PWM = 18;
         const int R_IN1 = 19, R_IN2 = 21, R_PWM = 22;
 #else
@@ -157,7 +161,9 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
             r["evt"] = "hello";
             r["host"] = g_hostname;
             r["board"] =
-#if defined(SPARK_BOARD_ESP32)
+#if defined(SPARK_BOARD_ESP32_S3)
+                "esp32-s3";
+#elif defined(SPARK_BOARD_ESP32)
                 "esp32";
 #else
                 "esp8266";

@@ -140,6 +140,7 @@ object CoreArchive {
         val (baseSubdir, variantSubdir) = when (target) {
             McuTarget.ESP8266_NODEMCU -> "cores/esp8266" to "variants/${BuildFlags.VARIANT}"
             McuTarget.ESP32_S3 -> "cores/esp32" to "variants/esp32s3"
+            McuTarget.ESP32_CAM -> error("ESP32-CAM core compilation is not available")
         }
         val out = mutableListOf<File>()
         for (root in listOf(File(coreDir, baseSubdir), File(coreDir, variantSubdir))) {

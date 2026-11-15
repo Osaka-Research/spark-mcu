@@ -32,7 +32,7 @@ Pins diverge by target:
 | target              | gcc/binutils/newlib ref     | phase-A driver                       |
 |---------------------|-----------------------------|--------------------------------------|
 | xtensa-lx106-elf    | `esp-2021r2-patch5` (gcc 10.3) | `ct-ng xtensa-lx106-elf`             |
-| xtensa-esp32s3-elf  | `esp-13.2.0_20240530` (gcc 13.2) | `build-xtensa-s3-phase-a.sh`         |
+| xtensa-esp32s3-elf  | binutils `esp-2.41.0_20240530`, GCC `esp-13.2.0_20240530`, newlib `esp-4.3.0_20240530` | `build-xtensa-s3-phase-a.sh` |
 
 Everything static. No shared libs — Bionic doesn't have the same dynamic
 linker glibc expects, and we don't want to ship glibc.
@@ -58,6 +58,9 @@ phase B ~30 min, rest is bookkeeping).
   occasionally re-link something it shouldn't. If you see "target libs
   missing" errors, the fallback is to run the full `make all && make install`
   on phase B with `--with-build-sysroot` pointed at phase-A's sysroot.
+- **S3 phase B disables LTO.** The Android NDK linker cannot build GCC's
+  `liblto_plugin` with the generated libtool configuration. Sketch and core
+  builds use ordinary object files, so the packaged compiler does not need LTO.
 - **NDK version matters.** API 24 is the floor. Going higher (26, 28) is
   fine; going lower means missing symbols like `getauxval` that newer gcc
   emits calls to.

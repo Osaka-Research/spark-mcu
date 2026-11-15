@@ -27,7 +27,7 @@ object Toolchain {
 
     // Monotonic version. Bump if the asset/jniLibs shape changes so the
     // on-device scratch area gets rebuilt on next launch.
-    private const val VERSION = 5
+    private const val VERSION = 6
 
     fun versionTag(): String = "v$VERSION"
 
@@ -37,9 +37,17 @@ object Toolchain {
     fun binDir(ctx: Context): File = File(root(ctx), "bin")
     fun sysroot(ctx: Context): File = File(root(ctx), "sysroot")
     fun coreDir(ctx: Context): File = File(root(ctx), "core")
+    fun binDir(ctx: Context, target: McuTarget): File =
+        if (target == McuTarget.ESP32_S3) File(root(ctx), "bin-s3") else binDir(ctx)
+    fun sysroot(ctx: Context, target: McuTarget): File =
+        if (target == McuTarget.ESP32_S3) File(root(ctx), "sysroot-s3") else sysroot(ctx)
+    fun coreDir(ctx: Context, target: McuTarget): File =
+        if (target == McuTarget.ESP32_S3) File(root(ctx), "core-s3") else coreDir(ctx)
 
     /** Full path to a toolchain binary once [ensurePrepared] has run. */
     fun bin(ctx: Context, name: String): File = File(binDir(ctx), name)
+    fun bin(ctx: Context, name: String, target: McuTarget): File =
+        File(binDir(ctx, target), name)
 
     /**
      * Idempotent. On first call, creates symlinks from `filesDir/toolchain/bin/<name>`
@@ -63,6 +71,18 @@ object Toolchain {
             linkJniBinaries(ctx)
             copyAssetTree(ctx, "toolchain/xtensa-lx106-elf", sysroot(ctx))
             copyAssetTree(ctx, "toolchain/arduino-core-esp8266", coreDir(ctx))
+            if (ctx.assets.list("toolchain/xtensa-esp32s3-elf").orEmpty().isNotEmpty()) {
+                copyAssetTree(ctx, "toolchain/xtensa-esp32s3-elf", sysroot(ctx, McuTarget.ESP32_S3))
+                // GCC locates its target headers and libgcc relative to its
+                // executable. Keep that prefix layout despite Android's
+                // requirement that executable files live in nativeLibraryDir.
+                val s3Sysroot = sysroot(ctx, McuTarget.ESP32_S3)
+                Os.symlink(s3Sysroot.absolutePath, File(root, McuTarget.ESP32_S3.toolchainTriple).absolutePath)
+                Os.symlink(File(s3Sysroot, "lib").absolutePath, File(root, "lib").absolutePath)
+            }
+            if (ctx.assets.list("toolchain/arduino-core-esp32").orEmpty().isNotEmpty()) {
+                copyAssetTree(ctx, "toolchain/arduino-core-esp32", coreDir(ctx, McuTarget.ESP32_S3))
+            }
 
             stamp.writeText(key)
         }
@@ -79,8 +99,11 @@ object Toolchain {
         for (lib in libs) {
             val unprefixed = lib.name.removePrefix("lib").removeSuffix(".so")
             // Skip Android framework / unrelated libs that happen to live in nativeLibraryDir.
-            if (!looksLikeToolchainBinary(unprefixed)) continue
-            val link = File(bin, unprefixed)
+            val s3 = unprefixed.startsWith("s3_") ||
+                unprefixed.startsWith("${McuTarget.ESP32_S3.toolchainTriple}-")
+            val name = unprefixed.removePrefix("s3_")
+            if (!looksLikeToolchainBinary(name)) continue
+            val link = File(if (s3) binDir(ctx, McuTarget.ESP32_S3).apply { mkdirs() } else bin, name)
             if (link.exists()) link.delete()
             try {
                 Os.symlink(lib.absolutePath, link.absolutePath)
@@ -104,7 +127,7 @@ object Toolchain {
         // Matches target cross-tools (xtensa-*-elf-{gcc,g++,ar,objcopy,...})
         // plus gcc helpers (as, ld, cc1, cc1plus, collect2). The prefix set
         // widens as new McuTargets land — see McuTarget.toolchainTriple.
-        if (unprefixed in setOf("as", "ld", "cc1", "cc1plus", "collect2")) return true
+        if (unprefixed in setOf("as", "ld", "cc1", "cc1plus", "collect2", "lto1", "lto-wrapper")) return true
         return McuTarget.values().any { unprefixed.startsWith("${it.toolchainTriple}-") }
     }
 

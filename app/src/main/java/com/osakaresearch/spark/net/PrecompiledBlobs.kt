@@ -3,16 +3,14 @@ package com.osakaresearch.spark.net
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import java.io.File
 
 /**
  * Builds a flash plan from a user-picked folder of precompiled blobs.
  *
- * We can't ship the arduino-esp32 output as APK assets (bootloader +
- * partitions are board/flash-config-specific, and arduino-esp32 is 200+ MB),
- * and we don't want to rebuild the APK every time the user retests. So the
- * blink path is: user picks a folder containing the four blobs produced by
- * `arduino-cli compile --fqbn esp32:esp32:esp32s3 Blink/` (with the app
- * binary renamed to firmware.bin), and we assemble the plan on demand.
+ * A user-picked Blink folder supplies a four-image flash plan. APKs that
+ * bundle the optional S3 compiler also carry the generic S3 board images;
+ * [loadS3Bundled] combines them with a newly compiled app image.
  */
 object PrecompiledBlobs {
 
@@ -36,6 +34,26 @@ object PrecompiledBlobs {
         data class Ok(val plan: List<FlashBlob>) : Loaded()
         data class Missing(val names: List<String>) : Loaded()
         data class Error(val reason: String) : Loaded()
+    }
+
+    /** Use the board images packaged with the S3 core for a freshly built app. */
+    fun loadS3Bundled(context: Context, appUri: Uri, coreDir: File): Loaded {
+        val prebuilt = File(coreDir, "prebuilt")
+        val found = mutableListOf<FlashBlob>()
+        for ((name, offset) in S3_BLINK_LAYOUT) {
+            val bytes = try {
+                if (name == "firmware.bin") {
+                    context.contentResolver.openInputStream(appUri)?.use { it.readBytes() }
+                } else {
+                    File(prebuilt, name).takeIf { it.isFile }?.readBytes()
+                }
+            } catch (t: Throwable) {
+                return Loaded.Error("$name: ${t.message ?: "read failed"}")
+            } ?: return Loaded.Missing(listOf(name))
+            if (bytes.isEmpty()) return Loaded.Error("$name: empty file")
+            found.add(FlashBlob(name, offset, bytes))
+        }
+        return Loaded.Ok(found)
     }
 
     fun loadS3Blink(context: Context, folderUri: Uri): Loaded {

@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.osakaresearch.spark.compile.McuTarget
 import com.osakaresearch.spark.compile.SketchBuilder
+import com.osakaresearch.spark.compile.Toolchain
 import com.osakaresearch.spark.net.FlashResult
 import com.osakaresearch.spark.net.Ota
 import com.osakaresearch.spark.net.OtaResult
@@ -79,6 +80,7 @@ fun FirmwareScreen() {
     var offsetHex by remember { mutableStateOf("0x0") }
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var selectedName by remember { mutableStateOf("") }
+    var compiledS3Selected by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var log by remember { mutableStateOf(listOf("firmware upload ready.")) }
     var uploading by remember { mutableStateOf(false) }
@@ -111,6 +113,7 @@ fun FirmwareScreen() {
     ) { uri ->
         if (uri != null) {
             selectedUri = uri
+            compiledS3Selected = false
             selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "firmware.bin"
             log = log + "picked: $selectedName"
         }
@@ -186,7 +189,7 @@ fun FirmwareScreen() {
         }
 
         // Board picker lives at the top because it gates which flash paths
-        // appear below (precompiled-blink only for S3, on-device compile only
+        // appear below (precompiled Blink for S3, on-device compile only
         // where a toolchain is bundled). Users were previously tapping Compile
         // with target=S3 because the board selector was buried inside the
         // compile card.
@@ -194,16 +197,23 @@ fun FirmwareScreen() {
             McuTarget.values().forEachIndexed { i, t ->
                 SegmentedButton(
                     selected = target == t,
-                    onClick = { if (!building && !uploading) target = t },
+                    onClick = {
+                        if (!building && !uploading && target != t) {
+                            target = t
+                            compiledS3Selected = false
+                            offsetHex = if (t == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                        }
+                    },
                     shape = SegmentedButtonDefaults.itemShape(i, McuTarget.values().size),
                 ) { Text(t.label) }
             }
         }
         Text(
-            target.detail,
+            if (target.isAvailable(context)) target.detail
+            else "${target.detail} · on-device compiler assets not bundled",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(
-                alpha = if (target.available) 0.6f else 0.9f,
+                alpha = if (target.isAvailable(context)) 0.6f else 0.9f,
             ),
         )
 
@@ -275,9 +285,30 @@ fun FirmwareScreen() {
                                         uploading = false
                                         return@Button
                                     }
-                                    log = log + "USB flash @ 0x${offset.toString(16)} ..."
+                                    log = log + if (target == McuTarget.ESP32_S3 && compiledS3Selected)
+                                        "USB flash S3 bootloader + partitions + app ..."
+                                    else "USB flash @ 0x${offset.toString(16)} ..."
                                     scope.launch {
-                                        val result = UsbFlasher.flash(
+                                        val result = if (target == McuTarget.ESP32_S3 && compiledS3Selected) {
+                                            when (val loaded = PrecompiledBlobs.loadS3Bundled(
+                                                context, uri, Toolchain.coreDir(context, target)
+                                            )) {
+                                                is PrecompiledBlobs.Loaded.Ok -> UsbFlasher.flashPlan(
+                                                    context = context,
+                                                    plan = loaded.plan,
+                                                    onProgress = { done, total ->
+                                                        progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
+                                                    },
+                                                    onLog = { line -> log = log + line },
+                                                    manualBoot = manualBoot,
+                                                    target = target,
+                                                )
+                                                is PrecompiledBlobs.Loaded.Missing -> FlashResult.Fail(
+                                                    "bundled S3 image missing: ${loaded.names.joinToString()}"
+                                                )
+                                                is PrecompiledBlobs.Loaded.Error -> FlashResult.Fail(loaded.reason)
+                                            }
+                                        } else UsbFlasher.flash(
                                             context = context,
                                             firmwareUri = uri,
                                             offset = offset,
@@ -314,7 +345,7 @@ fun FirmwareScreen() {
 
         // S3 blink validation: lets us exercise the flasher (reset sequence,
         // image_v2 blobs, multi-offset plan) using arduino-cli output before
-        // the on-phone S3 compile path exists. Shown only when the user has
+        // the optional S3 compiler is packaged. Shown only when the user has
         // picked ESP32-S3 + USB mode.
         if (mode == FlashMode.USB && target == McuTarget.ESP32_S3) {
             Card(
@@ -424,10 +455,9 @@ fun FirmwareScreen() {
             }
         }
 
-        // Compile card hidden for targets with no on-device toolchain yet —
-        // S3 users should use the precompiled-blink card above instead of
-        // tapping a Compile button that always fails.
-        if (target.available) {
+        // The S3 build card appears once the optional compiler and core assets
+        // have been packaged into this APK.
+        if (target.isAvailable(context)) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -437,7 +467,10 @@ fun FirmwareScreen() {
                     Text("Sketch · on-device build", fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
+                        if (target == McuTarget.ESP32_S3)
+                            "Compile an .ino for ESP32-S3. The USB Flash button uses the bundled bootloader, partition images, and new app image together."
+                        else
+                            "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     )
@@ -468,6 +501,7 @@ fun FirmwareScreen() {
                         onClick = {
                             if (building) return@Button
                             building = true
+                            compiledS3Selected = false
                             scope.launch {
                                 val picked = sketchUri
                                 val ino: File = if (picked != null) {
@@ -502,6 +536,7 @@ fun FirmwareScreen() {
                                     if (exported != null) {
                                         selectedUri = exported.uri
                                         selectedName = exported.displayName
+                                        compiledS3Selected = target == McuTarget.ESP32_S3
                                         log = log + "saved: ${exported.humanPath}"
                                     } else {
                                         log = log + "bin export failed"

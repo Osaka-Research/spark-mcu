@@ -20,9 +20,9 @@ TARGET="xtensa-esp32s3-elf"
 
 # Must match build-xtensa-s3-android.sh — phase B copies target libs from
 # PHASE_A_PREFIX, so a version skew would silently ship mismatched libgcc.
-BINUTILS_REF="esp-13.2.0_20240530"
+BINUTILS_REF="esp-2.41.0_20240530"
 GCC_REF="esp-13.2.0_20240530"
-NEWLIB_REF="esp-13.2.0_20240530"
+NEWLIB_REF="esp-4.3.0_20240530"
 GMP_VER="6.3.0"
 MPFR_VER="4.2.1"
 MPC_VER="1.3.1"
@@ -122,8 +122,8 @@ mkdir -p "$BLD/newlib" && cd "$BLD/newlib"
   --prefix="$PHASE_A_PREFIX" \
   --disable-newlib-supplied-syscalls \
   --disable-nls
-make -j"$JOBS"
-make install
+make -j"$JOBS" all-target-newlib
+make install-target-newlib
 
 # --- 4. gcc stage 2 (C + C++ against installed newlib) -----------------------
 echo "===== gcc stage 2 (phase A, $TARGET) ====="

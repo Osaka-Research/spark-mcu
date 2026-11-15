@@ -26,6 +26,8 @@ val toolchainRepo = (project.findProperty("spark.toolchain.githubRepo") as Strin
 val toolchainTag = (project.findProperty("spark.toolchain.releaseTag") as String?) ?: ""
 val toolchainAsset = (project.findProperty("spark.toolchain.asset") as String?) ?: ""
 val skipToolchainFetch = (project.findProperty("spark.toolchain.skipFetch") as String?)?.toBoolean() ?: false
+val s3ToolchainTag = (project.findProperty("spark.s3.toolchain.releaseTag") as String?).orEmpty()
+val s3ToolchainAsset = "xtensa-esp32s3-elf-android-arm64.tar.xz"
 
 val toolchainCacheDir = layout.buildDirectory.dir("toolchain-cache").get().asFile
 val toolchainJniLibsDir = file("src/main/jniLibs/arm64-v8a")
@@ -65,10 +67,10 @@ tasks.register("extractXtensaToolchain") {
 
     val tarball = File(toolchainCacheDir, "$toolchainTag-$toolchainAsset")
     val stamp = File(toolchainCacheDir, "$toolchainTag.extracted")
-    inputs.file(tarball)
+    if (!skipToolchainFetch || tarball.exists()) inputs.file(tarball)
     outputs.file(stamp)
-    outputs.dir(toolchainJniLibsDir)
-    outputs.dir(toolchainAssetsDir)
+    outputs.dir(File(toolchainAssetsDir, "xtensa-lx106-elf"))
+    outputs.dir(File(toolchainAssetsDir, "arduino-core-esp8266"))
 
     doLast {
         if (skipToolchainFetch && !tarball.exists()) {
@@ -82,7 +84,6 @@ tasks.register("extractXtensaToolchain") {
             commandLine("tar", "-xJf", tarball.absolutePath, "-C", stage.absolutePath)
         }
 
-        toolchainJniLibsDir.deleteRecursively()
         toolchainJniLibsDir.mkdirs()
         val binDir = File(stage, "bin")
         if (!binDir.isDirectory) throw GradleException("tarball missing bin/ dir")
@@ -96,12 +97,13 @@ tasks.register("extractXtensaToolchain") {
         }
         logger.lifecycle("  -> wrote $count binaries to ${toolchainJniLibsDir.relativeTo(projectDir)}")
 
-        toolchainAssetsDir.deleteRecursively()
         toolchainAssetsDir.mkdirs()
         listOf("xtensa-lx106-elf", "arduino-core-esp8266").forEach { name ->
             val src = File(stage, name)
             if (src.isDirectory) {
-                src.copyRecursively(File(toolchainAssetsDir, name), overwrite = true)
+                val dest = File(toolchainAssetsDir, name)
+                dest.deleteRecursively()
+                src.copyRecursively(dest, overwrite = true)
                 logger.lifecycle("  -> staged assets/toolchain/$name")
             }
         }
@@ -112,9 +114,80 @@ tasks.register("extractXtensaToolchain") {
     }
 }
 
+tasks.register("fetchS3Toolchain") {
+    group = "spark"
+    val tarball = File(toolchainCacheDir, s3ToolchainAsset)
+    onlyIf { s3ToolchainTag.isNotBlank() && (!tarball.exists() || tarball.length() < 1024) }
+    doLast {
+        toolchainCacheDir.mkdirs()
+        val url = "https://github.com/$toolchainRepo/releases/download/$s3ToolchainTag/$s3ToolchainAsset"
+        val tmp = File(tarball.parentFile, "$s3ToolchainAsset.part")
+        downloadFollowingRedirects(url, tmp)
+        if (!tmp.renameTo(tarball)) throw GradleException("cannot install $s3ToolchainAsset")
+    }
+}
+
+tasks.register("extractS3Toolchain") {
+    group = "spark"
+    dependsOn("extractXtensaToolchain", "fetchS3Toolchain")
+    val tarball = File(toolchainCacheDir, s3ToolchainAsset)
+    val stamp = File(toolchainCacheDir, "$s3ToolchainAsset.extracted")
+    onlyIf { tarball.exists() && tarball.length() >= 1024 }
+    inputs.file(tarball).optional()
+    outputs.file(stamp)
+    outputs.dir(File(toolchainAssetsDir, "xtensa-esp32s3-elf"))
+    outputs.dir(File(toolchainAssetsDir, "arduino-core-esp32"))
+    doLast {
+        val stage = File(toolchainCacheDir, "stage-s3").apply {
+            deleteRecursively(); mkdirs()
+        }
+        exec { commandLine("tar", "-xJf", tarball.absolutePath, "-C", stage.absolutePath) }
+        val target = "xtensa-esp32s3-elf"
+        val binDir = File(stage, "bin")
+        val targetDir = File(stage, target)
+        val coreDir = File(stage, "arduino-core-esp32")
+        if (!binDir.isDirectory || !targetDir.isDirectory || !coreDir.isDirectory) {
+            throw GradleException("S3 tarball needs bin/, $target/, and arduino-core-esp32/ at root")
+        }
+        binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
+            val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
+            val dest = File(toolchainJniLibsDir, "lib${if (helper) "s3_" else ""}${bin.name}.so")
+            bin.copyTo(dest, overwrite = true)
+            dest.setExecutable(true)
+        }
+        val helperSources = listOf(
+            File(stage, "$target/bin/as") to "as",
+            File(stage, "$target/bin/ld") to "ld",
+            File(stage, "libexec/gcc/$target/13.2.0/cc1") to "cc1",
+            File(stage, "libexec/gcc/$target/13.2.0/cc1plus") to "cc1plus",
+            File(stage, "libexec/gcc/$target/13.2.0/collect2") to "collect2",
+            File(stage, "libexec/gcc/$target/13.2.0/lto1") to "lto1",
+            File(stage, "libexec/gcc/$target/13.2.0/lto-wrapper") to "lto-wrapper",
+        )
+        helperSources.forEach { (src, name) ->
+            if (!src.isFile) {
+                if (name in setOf("lto1", "lto-wrapper")) return@forEach
+                throw GradleException("S3 toolchain missing helper: ${src.absolutePath}")
+            }
+            src.copyTo(File(toolchainJniLibsDir, "libs3_$name.so"), overwrite = true)
+        }
+        val assets = File(toolchainAssetsDir, target)
+        assets.deleteRecursively()
+        targetDir.copyRecursively(assets, overwrite = true)
+        val gccLibs = File(stage, "lib/gcc/$target")
+        if (gccLibs.isDirectory) {
+            gccLibs.copyRecursively(File(assets, "lib/gcc/$target"), overwrite = true)
+        }
+        val coreAssets = File(toolchainAssetsDir, "arduino-core-esp32")
+        coreAssets.deleteRecursively()
+        coreDir.copyRecursively(coreAssets, overwrite = true)
+        stamp.writeText("sha256=${sha256(tarball)}\n")
+    }
+}
+
 afterEvaluate {
     tasks.named("preBuild") {
-        dependsOn("extractXtensaToolchain")
+        dependsOn("extractS3Toolchain")
     }
 }
 
@@ -212,6 +285,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
+
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
