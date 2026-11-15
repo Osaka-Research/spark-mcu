@@ -189,7 +189,7 @@ fun FirmwareScreen() {
         }
 
         // Board picker lives at the top because it gates which flash paths
-        // appear below (precompiled-blink only for S3, on-device compile only
+        // appear below (precompiled Blink for S3, on-device compile only
         // where a toolchain is bundled). Users were previously tapping Compile
         // with target=S3 because the board selector was buried inside the
         // compile card.
@@ -345,7 +345,7 @@ fun FirmwareScreen() {
 
         // S3 blink validation: lets us exercise the flasher (reset sequence,
         // image_v2 blobs, multi-offset plan) using arduino-cli output before
-        // the on-phone S3 compile path exists. Shown only when the user has
+        // the optional S3 compiler is packaged. Shown only when the user has
         // picked ESP32-S3 + USB mode.
         if (mode == FlashMode.USB && target == McuTarget.ESP32_S3) {
             Card(
