@@ -60,7 +60,17 @@ object SketchBuilder {
             log("core.a: ensuring built")
             val coreA = CoreArchive.ensureBuilt(ctx) { log("  $it") }
 
-            // 3. sketch.cpp → sketch.o
+            // 3. library discovery — walks the sketch's #includes and pulls in
+            // any shipped arduino-core-esp8266 library that provides a matching
+            // header. The resolver walks transitively so a library's own
+            // #includes bring in its deps.
+            val libs = LibraryResolver.resolve(sketchCpp, core) { log("  $it") }
+            if (libs.sources.isNotEmpty()) {
+                log("libraries: ${libs.includeDirs.size} dir(s), ${libs.sources.size} src(s)")
+            }
+            val libIncludeFlags = libs.includeDirs.map { "-I${it.absolutePath}" }
+
+            // 4. sketch.cpp → sketch.o
             log("compile: ${sketchCpp.name}")
             val sketchObj = File(work, "sketch.cpp.o")
             run {
@@ -69,6 +79,7 @@ object SketchBuilder {
                     add("-B"); add(binDir.absolutePath + "/")
                     addAll(BuildFlags.commonDefines())
                     addAll(BuildFlags.includeDirs(sysroot, core))
+                    addAll(libIncludeFlags)
                     addAll(BuildFlags.cppFlags())
                     add(sketchCpp.absolutePath)
                     add("-o"); add(sketchObj.absolutePath)
@@ -78,6 +89,44 @@ object SketchBuilder {
                 if (exit != 0 || !sketchObj.exists()) {
                     return@withContext Result.Fail("sketch compile failed (exit=$exit)", logBuf.toString())
                 }
+            }
+
+            // 4b. compile library sources alongside the sketch. Each library
+            // source gets its own .o in work/libs/ — kept per-sketch (not
+            // cached like core.a) because the set of libs changes per sketch
+            // and recompiles are cheap relative to core.a.
+            val libObjs = if (libs.sources.isEmpty()) emptyList() else {
+                val libObjsDir = File(work, "libs").apply { mkdirs() }
+                val objs = mutableListOf<File>()
+                for ((i, src) in libs.sources.withIndex()) {
+                    val obj = File(libObjsDir, "${i.toString().padStart(3, '0')}_${src.name}.o")
+                    val (compiler, flags) = when (src.extension.lowercase()) {
+                        "cpp", "cc", "cxx" -> gpp to BuildFlags.cppFlags()
+                        "s" -> gcc to BuildFlags.sFlags()
+                        else -> gcc to BuildFlags.cFlags()
+                    }
+                    val cmd = buildList {
+                        add(compiler.absolutePath)
+                        add("-B"); add(binDir.absolutePath + "/")
+                        addAll(BuildFlags.commonDefines())
+                        addAll(BuildFlags.includeDirs(sysroot, core))
+                        addAll(libIncludeFlags)
+                        addAll(flags)
+                        add(src.absolutePath)
+                        add("-o"); add(obj.absolutePath)
+                    }
+                    val (exit, out) = runProcess(cmd, work, binDir)
+                    if (exit != 0 || !obj.exists()) {
+                        if (out.isNotBlank()) log(out.trimEnd())
+                        return@withContext Result.Fail(
+                            "library compile failed: ${src.name} (exit=$exit)",
+                            logBuf.toString(),
+                        )
+                    }
+                    objs.add(obj)
+                }
+                log("libraries: compiled ${objs.size} obj(s)")
+                objs
             }
 
             // 4. linker scripts
@@ -104,6 +153,7 @@ object SketchBuilder {
                     add("-o"); add(elf.absolutePath)
                     add("-Wl,--start-group")
                     add(sketchObj.absolutePath)
+                    addAll(libObjs.map { it.absolutePath })
                     add(coreA.absolutePath)
                     addAll(BuildFlags.linkLibs())
                     add("-Wl,--end-group")

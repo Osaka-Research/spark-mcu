@@ -20,6 +20,15 @@ object CoreArchive {
     private const val SUBDIR = "build/core"
     private const val STAMP = ".built"
 
+    /**
+     * Source filenames whose `.o` names the LD script matches by exact basename
+     * (via `EXCLUDE_FILE (...)`). These must be archived under their natural
+     * name — any prefix would silently misroute them. umm_malloc is the only
+     * one in the arduino-core-esp8266 3.1.2 linker script today; extend here
+     * if we pick up new EXCLUDE_FILE entries on a core bump.
+     */
+    private val LD_EXACT_MATCH_SOURCES = setOf("umm_malloc.cpp")
+
     private val buildMutex = Mutex()
 
     private fun root(ctx: Context): File = File(ctx.filesDir, SUBDIR)
@@ -68,7 +77,20 @@ object CoreArchive {
                 // The Arduino linker script routes code to flash via filename filters
                 // like `*.cpp.o(.text*)`; stripping `.cpp`/`.c` drops everything into
                 // the `.text1` catch-all and overflows iram1_0_seg.
-                val obj = File(objsDir, "${i.toString().padStart(3, '0')}_${src.name}.o")
+                //
+                // A small set of core files are matched by exact basename in the LD
+                // script's EXCLUDE_FILE lists — notably `umm_malloc.cpp.o`, which
+                // must land in IRAM (`.text1`) because it services allocations
+                // from interrupt context. Prefixing those names with `NNN_` makes
+                // the EXCLUDE_FILE pattern miss, silently drops umm_malloc into
+                // `.irom0.text`, and produces the epc1=0x402020ec boot loop the
+                // moment the SDK first touches heap from an ISR path.
+                val keepExactName = src.name in LD_EXACT_MATCH_SOURCES
+                val obj = if (keepExactName) {
+                    File(objsDir, "${src.name}.o")
+                } else {
+                    File(objsDir, "${i.toString().padStart(3, '0')}_${src.name}.o")
+                }
                 val (compiler, flags) = when (src.extension.lowercase()) {
                     "cpp", "cc", "cxx" -> gpp to BuildFlags.cppFlags()
                     "s" -> gcc to BuildFlags.sFlags()
@@ -134,7 +156,7 @@ object CoreArchive {
         // in VERSION bumps since sources ship as assets keyed by VERSION.
         // SCHEMA bump invalidates caches when the object-naming scheme or
         // archive layout changes without any flag/toolchain delta.
-        val schema = 2
+        val schema = 3
         val flags = (BuildFlags.commonDefines() +
             BuildFlags.cFlags() + BuildFlags.cppFlags() + BuildFlags.sFlags())
             .joinToString("|")

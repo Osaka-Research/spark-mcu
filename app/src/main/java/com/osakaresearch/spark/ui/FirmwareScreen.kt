@@ -84,6 +84,8 @@ fun FirmwareScreen() {
     var usbRefreshTick by remember { mutableIntStateOf(0) }
     var manualBoot by remember { mutableStateOf(false) }
     var building by remember { mutableStateOf(false) }
+    var sketchUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var sketchName by remember { mutableStateOf("") }
 
     LaunchedEffect(connState) {
         if (hostOverride.isBlank() && connState is SparkConnState.Connected) {
@@ -106,6 +108,16 @@ fun FirmwareScreen() {
             selectedUri = uri
             selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "firmware.bin"
             log = log + "picked: $selectedName"
+        }
+    }
+
+    val sketchPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            sketchUri = uri
+            sketchName = resolveSketchName(context, uri)
+            log = log + "sketch: $sketchName"
         }
     }
 
@@ -250,53 +262,79 @@ fun FirmwareScreen() {
             shape = RoundedCornerShape(12.dp),
         ) {
             Column(Modifier.padding(14.dp)) {
-                Text("Debug · on-device build", fontWeight = FontWeight.SemiBold)
+                Text("Sketch · on-device build", fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Compile a Blink .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast.",
+                    "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 )
                 Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = {
-                        if (building) return@Button
-                        building = true
-                        scope.launch {
-                            val ino = File(context.filesDir, "sketches/blink/blink.ino").apply {
-                                parentFile?.mkdirs()
-                                writeText(BLINK_INO)
-                            }
-                            log = log + "compiling ${ino.name} ..."
-                            val result = SketchBuilder.buildSketch(context, ino) { line ->
-                                log = log + line
-                            }
-                            log = log + when (result) {
-                                is SketchBuilder.Result.Ok ->
-                                    "ok: ${result.output.name} (${result.output.length()} bytes)"
-                                is SketchBuilder.Result.Fail ->
-                                    "failed: ${result.reason}"
-                            }
-                            // Persist the fresh bin to Downloads/ so it survives the
-                            // next build's work-dir wipe, and auto-select it for flashing.
-                            if (result is SketchBuilder.Result.Ok) {
-                                val exported = BinExport.save(context, "blink", result.output.readBytes())
-                                if (exported != null) {
-                                    selectedUri = exported.uri
-                                    selectedName = exported.displayName
-                                    log = log + "saved: ${exported.humanPath}"
+                Text(
+                    if (sketchUri == null) "no sketch selected (demo Blink will be used)" else sketchName,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row {
+                    OutlinedButton(
+                        onClick = { sketchPicker.launch(arrayOf("*/*")) },
+                        enabled = !building,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Pick .ino") }
+                    Spacer(Modifier.width(10.dp))
+                    Button(
+                        onClick = {
+                            if (building) return@Button
+                            building = true
+                            scope.launch {
+                                val picked = sketchUri
+                                val ino: File = if (picked != null) {
+                                    val ok = copySketchFromUri(context, picked, sketchName)
+                                    if (ok == null) {
+                                        log = log + "failed to read picked sketch"
+                                        building = false
+                                        return@launch
+                                    }
+                                    ok
                                 } else {
-                                    log = log + "bin export failed"
+                                    File(context.filesDir, "sketches/blink/blink.ino").apply {
+                                        parentFile?.mkdirs()
+                                        writeText(BLINK_INO)
+                                    }
                                 }
-                                val elfExport = BinExport.saveAs(context, "blink", "elf", result.elf.readBytes())
-                                log = log + (elfExport?.let { "saved: ${it.humanPath}" } ?: "elf export failed")
+                                val slug = ino.nameWithoutExtension
+                                log = log + "compiling ${ino.name} ..."
+                                val result = SketchBuilder.buildSketch(context, ino) { line ->
+                                    log = log + line
+                                }
+                                log = log + when (result) {
+                                    is SketchBuilder.Result.Ok ->
+                                        "ok: ${result.output.name} (${result.output.length()} bytes)"
+                                    is SketchBuilder.Result.Fail ->
+                                        "failed: ${result.reason}"
+                                }
+                                // Persist the fresh bin to Downloads/ so it survives the
+                                // next build's work-dir wipe, and auto-select it for flashing.
+                                if (result is SketchBuilder.Result.Ok) {
+                                    val exported = BinExport.save(context, slug, result.output.readBytes())
+                                    if (exported != null) {
+                                        selectedUri = exported.uri
+                                        selectedName = exported.displayName
+                                        log = log + "saved: ${exported.humanPath}"
+                                    } else {
+                                        log = log + "bin export failed"
+                                    }
+                                    val elfExport = BinExport.saveAs(context, slug, "elf", result.elf.readBytes())
+                                    log = log + (elfExport?.let { "saved: ${it.humanPath}" } ?: "elf export failed")
+                                }
+                                building = false
                             }
-                            building = false
-                        }
-                    },
-                    enabled = !building && !uploading,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (building) "Building" else "Compile Blink .ino") }
+                        },
+                        enabled = !building && !uploading,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (building) "Building" else "Compile") }
+                }
             }
         }
 
@@ -508,3 +546,50 @@ private fun parseOffset(s: String): Int? {
         else t.toLong(16).toInt()
     } catch (_: Throwable) { null }
 }
+
+/**
+ * Pulls the user-visible display name out of a SAF Uri. SAF Uris don't carry
+ * a filesystem path — only a documentId — so ContentResolver.query is the
+ * only reliable way to recover the original filename for logging and for
+ * naming the on-disk copy under `sketches/<slug>/`.
+ */
+private fun resolveSketchName(context: android.content.Context, uri: android.net.Uri): String {
+    val cursor = context.contentResolver.query(uri, null, null, null, null)
+    cursor?.use {
+        val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (idx >= 0 && it.moveToFirst()) {
+            val name = it.getString(idx)
+            if (!name.isNullOrBlank()) return name
+        }
+    }
+    return uri.lastPathSegment?.substringAfterLast('/') ?: "sketch.ino"
+}
+
+/**
+ * Copies the SAF-picked sketch into the app's private sketches dir so the
+ * compile pipeline has a real `java.io.File` to work with. The slug (sketch
+ * directory name) is derived from the picked file's basename, sanitized to
+ * a conservative character set that's safe as a filesystem path and as a
+ * C translation-unit name.
+ *
+ * Non-`.ino` files are still accepted — the user may paste a `.cpp` or
+ * forget the extension — but we always name the on-disk copy with `.ino`
+ * so [SketchBuilder.buildSketch]'s `preprocessIno` recognises it.
+ */
+private fun copySketchFromUri(
+    context: android.content.Context,
+    uri: android.net.Uri,
+    displayName: String,
+): File? = runCatching {
+    val baseRaw = displayName.substringBeforeLast('.', displayName).ifBlank { "sketch" }
+    val slug = baseRaw.lowercase().replace(Regex("[^a-z0-9_]+"), "_").trim('_').ifBlank { "sketch" }
+    val dir = File(context.filesDir, "sketches/$slug").apply {
+        deleteRecursively()
+        mkdirs()
+    }
+    val out = File(dir, "$slug.ino")
+    context.contentResolver.openInputStream(uri)?.use { input ->
+        out.outputStream().use { input.copyTo(it) }
+    } ?: return@runCatching null
+    out
+}.getOrNull()

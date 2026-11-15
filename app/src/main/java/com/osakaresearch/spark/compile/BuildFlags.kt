@@ -39,10 +39,12 @@ object BuildFlags {
         "-DTCP_MSS=1460",
         "-DLWIP_FEATURES=1",
         "-DLWIP_IPV6=0",
-        "-DNONOSDK=0x$BUILD_SDK",
-        // ARDUINO_ESP8266_RELEASE[_x_y_z] come from core_version.h; defining
-        // them here again just produces redefinition warnings with a mismatched
-        // format (underscores vs. dots).
+        // NONOSDK is set by the SDK's user_interface.h (to 0x22100 for the
+        // NONOSDK22x_190703 branch). Arduino's platform.txt does not define
+        // NONOSDK on the command line; we used to, with "0x$BUILD_SDK" that
+        // expanded to the invalid token "0xNONOSDK22x_190703" — the resulting
+        // bogus NONOSDK value tripped wrong #if branches in SDK headers and
+        // was the root cause of the epc1=0x402020ec boot loop.
         "-DMMU_IRAM_SIZE=0x8000",
         "-DMMU_ICACHE_SIZE=0x8000",
     )
