@@ -189,6 +189,9 @@ jobs:
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           qemu-aarch64-static -L "$SYSROOT" "$BIN" --version || echo "qemu smoke-test failed (non-fatal)"
 
+      - name: Stage Arduino-ESP32 S3 core and SDK
+        run: bash firmware/toolchain/stage-arduino-s3.sh
+
       - name: Package tarball
         run: |
           set -euo pipefail
@@ -197,7 +200,8 @@ jobs:
           test -d "$PREFIX/$TARGET/include"
           test -d "$PREFIX/$TARGET/lib"
           cd "$PREFIX"
-          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib
+          test -f "$PREFIX/arduino-core-esp32/prebuilt/core.a"
+          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32
           tar -tJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" | sed -n '1,20p'
           ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"
 

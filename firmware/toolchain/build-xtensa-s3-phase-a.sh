@@ -122,8 +122,8 @@ mkdir -p "$BLD/newlib" && cd "$BLD/newlib"
   --prefix="$PHASE_A_PREFIX" \
   --disable-newlib-supplied-syscalls \
   --disable-nls
-make -j"$JOBS"
-make install
+make -j"$JOBS" all-target-newlib
+make install-target-newlib
 
 # --- 4. gcc stage 2 (C + C++ against installed newlib) -----------------------
 echo "===== gcc stage 2 (phase A, $TARGET) ====="
