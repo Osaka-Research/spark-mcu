@@ -1,13 +1,15 @@
-name: xtensa-lx106-elf toolchain (Android host)
+name: xtensa toolchain (Android host)
 
 # Canadian cross:
 #   build  = x86_64-linux-gnu  (GH Actions ubuntu runner)
 #   host   = aarch64-linux-android  (where the toolchain binaries run — our phones)
-#   target = xtensa-lx106-elf  (what the toolchain compiles for — ESP8266)
+#   target = xtensa-lx106-elf  (ESP8266) and xtensa-esp32s3-elf (ESP32-S3)
 #
-# Output: a tarball of binutils + gcc + newlib that, when unpacked on an
-# Android arm64 device, produces a working ESP8266 cross-compiler.
-# Consumed by phase 2 (prebuild Arduino core.a) and phase 3 (APK packaging).
+# Produces one tarball per target. Both are consumed by phase 2
+# (prebuild Arduino core.a) and phase 3 (APK packaging). The two targets
+# run as sibling jobs because their phase-A paths diverge: lx106 uses
+# ct-ng's canned sample, S3 uses a direct binutils+gcc+newlib build
+# pinned to Espressif's gcc 13.2 era (see firmware/toolchain/README.md).
 
 on:
   workflow_dispatch:
@@ -32,13 +34,14 @@ concurrency:
 env:
   NDK_VERSION: "r26d"
   ANDROID_API: "24"
-  TARGET: "xtensa-lx106-elf"
   HOST_TRIPLE: "aarch64-linux-android"
-  PREFIX: "/opt/xtensa-lx106-elf-android"
 
 jobs:
-  build:
+  build-lx106:
     runs-on: ubuntu-22.04
+    env:
+      TARGET: "xtensa-lx106-elf"
+      PREFIX: "/opt/xtensa-lx106-elf-android"
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -132,4 +135,78 @@ jobs:
         with:
           tag_name: ${{ inputs.release_tag }}
           files: ${{ runner.temp }}/xtensa-lx106-elf-android-arm64.tar.xz
+          fail_on_unmatched_files: true
+
+  build-s3:
+    runs-on: ubuntu-22.04
+    env:
+      TARGET: "xtensa-esp32s3-elf"
+      PREFIX: "/opt/xtensa-esp32s3-elf-android"
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex gperf gawk texinfo help2man \
+            libtool-bin autoconf automake pkg-config \
+            libncurses-dev libexpat1-dev libssl-dev zlib1g-dev \
+            python3 python3-pip git wget curl xz-utils unzip ninja-build \
+            qemu-user-static
+
+      - name: Fetch Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -O ndk.zip
+          unzip -q ndk.zip
+          echo "NDK_ROOT=$RUNNER_TEMP/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Phase A — native cross (x86_64 → xtensa-esp32s3-elf)
+        # No ct-ng sample for S3's gcc-13.2 era; we drive binutils/gcc/newlib
+        # directly so phase B can copy target libs out of PHASE_A_PREFIX.
+        run: |
+          set -euo pipefail
+          export PHASE_A_PREFIX="$HOME/x-tools/xtensa-esp32s3-elf"
+          mkdir -p "$PHASE_A_PREFIX"
+          chmod +x firmware/toolchain/build-xtensa-s3-phase-a.sh
+          firmware/toolchain/build-xtensa-s3-phase-a.sh
+          echo "PHASE_A_PREFIX=$PHASE_A_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Phase B — Canadian cross (aarch64-android → xtensa-esp32s3-elf)
+        run: |
+          set -euo pipefail
+          chmod +x firmware/toolchain/build-xtensa-s3-android.sh
+          firmware/toolchain/build-xtensa-s3-android.sh
+
+      - name: Smoke-test under qemu-aarch64
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          BIN="$PREFIX/bin/xtensa-esp32s3-elf-gcc"
+          SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          qemu-aarch64-static -L "$SYSROOT" "$BIN" --version || echo "qemu smoke-test failed (non-fatal)"
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          cd "$(dirname "$PREFIX")"
+          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" "$(basename "$PREFIX")"
+          ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtensa-esp32s3-elf-android-arm64
+          path: ${{ runner.temp }}/xtensa-esp32s3-elf-android-arm64.tar.xz
+          retention-days: 30
+
+      - name: Attach to release
+        if: inputs.upload_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: ${{ runner.temp }}/xtensa-esp32s3-elf-android-arm64.tar.xz
           fail_on_unmatched_files: true

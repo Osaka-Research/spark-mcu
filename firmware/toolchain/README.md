@@ -1,7 +1,8 @@
-# xtensa-lx106-elf toolchain for Android arm64
+# xtensa toolchains for Android arm64
 
-Phase 1 of the on-phone compile pipeline. Produces a cross-compiler tarball
-that runs **on Android arm64 (Bionic)** and compiles **for ESP8266**.
+Phase 1 of the on-phone compile pipeline. Produces cross-compiler tarballs
+that run **on Android arm64 (Bionic)** and compile **for ESP8266** and
+**ESP32-S3**. Each target is a sibling job in `.github/workflows/xtensa-toolchain.yml`.
 
 ## Why this exists
 
@@ -12,19 +13,26 @@ Spark APK can bundle the binaries and invoke them via `ProcessBuilder`.
 
 ## What it builds
 
-A Canadian cross:
+Two Canadian crosses, same build + host axes, different targets:
 
-| axis   | value                     |
-|--------|---------------------------|
-| build  | `x86_64-linux-gnu` (CI)   |
-| host   | `aarch64-linux-android` (API 24+) |
-| target | `xtensa-lx106-elf`        |
+| axis   | value                              |
+|--------|------------------------------------|
+| build  | `x86_64-linux-gnu` (CI)            |
+| host   | `aarch64-linux-android` (API 24+)  |
+| target | `xtensa-lx106-elf` or `xtensa-esp32s3-elf` |
 
-Contents of the output tarball:
+Contents of each output tarball:
 
-- `bin/xtensa-lx106-elf-{gcc,g++,ld,ar,as,objcopy,strip,...}` — aarch64 ELFs
-- `xtensa-lx106-elf/include/` — newlib + libstdc++ headers
-- `xtensa-lx106-elf/lib/` — libc.a, libm.a, libstdc++.a, libgcc.a
+- `bin/<target>-{gcc,g++,ld,ar,as,objcopy,strip,...}` — aarch64 ELFs
+- `<target>/include/` — newlib + libstdc++ headers
+- `<target>/lib/` — libc.a, libm.a, libstdc++.a, libgcc.a
+
+Pins diverge by target:
+
+| target              | gcc/binutils/newlib ref     | phase-A driver                       |
+|---------------------|-----------------------------|--------------------------------------|
+| xtensa-lx106-elf    | `esp-2021r2-patch5` (gcc 10.3) | `ct-ng xtensa-lx106-elf`             |
+| xtensa-esp32s3-elf  | `esp-13.2.0_20240530` (gcc 13.2) | `build-xtensa-s3-phase-a.sh`         |
 
 Everything static. No shared libs — Bionic doesn't have the same dynamic
 linker glibc expects, and we don't want to ship glibc.
