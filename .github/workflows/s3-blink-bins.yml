@@ -37,18 +37,28 @@ jobs:
         run: |
           mkdir -p Blink
           cat > Blink/Blink.ino <<'EOF'
-          // Minimal blink for ESP32-S3. LED_BUILTIN resolves per board — for the
-          // S3 Dev Module variant the Arduino core maps it to the on-board RGB
-          // LED via neopixelWrite; for boards without an on-board LED, swap this
-          // for digitalWrite on your wired-up GPIO.
+          // Minimal blink for ESP32-S3. Most S3 dev boards (DevKitC-1 and the
+          // bazillion clones) wire the onboard "LED" to a WS2812 on GPIO 48,
+          // which digitalWrite can't drive — it needs a 24-bit colour frame.
+          // When arduino-esp32 detects such a board it defines RGB_BUILTIN;
+          // we branch on that so the same sketch works on plain-GPIO boards.
           void setup() {
+          #ifndef RGB_BUILTIN
             pinMode(LED_BUILTIN, OUTPUT);
+          #endif
           }
           void loop() {
+          #ifdef RGB_BUILTIN
+            neopixelWrite(RGB_BUILTIN, 32, 0, 0);  // red
+            delay(500);
+            neopixelWrite(RGB_BUILTIN, 0, 0, 0);
+            delay(500);
+          #else
             digitalWrite(LED_BUILTIN, HIGH);
             delay(500);
             digitalWrite(LED_BUILTIN, LOW);
             delay(500);
+          #endif
           }
           EOF
 
