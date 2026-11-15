@@ -69,14 +69,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/crosstool-ng
-          key: ctng-espressif-${{ runner.os }}-v1
+          key: ctng-espressif-esp8266-1.22.x-rel-${{ runner.os }}-v2
 
       - name: Build crosstool-NG (Espressif fork)
+        # Pinned to esp8266-1.22.x-rel: the main branch dropped the
+        # xtensa-lx106-elf sample, so `ct-ng xtensa-lx106-elf` fails with
+        # "No rule to make target". This branch still ships it.
         if: steps.cache-ctng.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           cd ~
-          git clone --depth 1 https://github.com/espressif/crosstool-NG.git crosstool-ng
+          git clone --depth 1 --branch esp8266-1.22.x-rel \
+            https://github.com/espressif/crosstool-NG.git crosstool-ng
           cd crosstool-ng
           ./bootstrap
           ./configure --prefix=$HOME/ctng-prefix
