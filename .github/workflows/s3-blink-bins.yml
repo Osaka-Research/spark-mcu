@@ -1,0 +1,84 @@
+name: S3 blink bins
+
+# Produces the four `.bin` files the app's "Precompiled Blink (S3)" card
+# needs — bootloader + partitions + boot_app0 + firmware. Exists so anyone
+# can validate the S3 USB-JTAG flasher path without a laptop + arduino-cli
+# setup. Download the artifact, drop it into a folder on the phone, pick
+# that folder in the app.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/s3-blink-bins.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install esp32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls \
+            "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
+          arduino-cli core update-index
+          # Pin to a known-good version so future core updates don't flip the
+          # bootloader bytes under us. Bump intentionally if a new SDK is needed.
+          arduino-cli core install esp32:esp32@3.0.5
+
+      - name: Write blink sketch
+        run: |
+          mkdir -p Blink
+          cat > Blink/Blink.ino <<'EOF'
+          // Minimal blink for ESP32-S3. LED_BUILTIN resolves per board — for the
+          // S3 Dev Module variant the Arduino core maps it to the on-board RGB
+          // LED via neopixelWrite; for boards without an on-board LED, swap this
+          // for digitalWrite on your wired-up GPIO.
+          void setup() {
+            pinMode(LED_BUILTIN, OUTPUT);
+          }
+          void loop() {
+            digitalWrite(LED_BUILTIN, HIGH);
+            delay(500);
+            digitalWrite(LED_BUILTIN, LOW);
+            delay(500);
+          }
+          EOF
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32s3 \
+            --output-dir out \
+            Blink/
+          ls -lh out/
+
+      - name: Stage artifact folder
+        # Lay the four files out exactly as the app's folder picker expects.
+        # The app checks by filename (see PrecompiledBlobs.kt), so the renames
+        # here are load-bearing.
+        run: |
+          mkdir -p s3-blink
+          cp out/Blink.ino.bootloader.bin  s3-blink/bootloader.bin
+          cp out/Blink.ino.partitions.bin  s3-blink/partitions.bin
+          # boot_app0 ships with the core, not the compile output.
+          cp "$HOME/.arduino15/packages/esp32/hardware/esp32/"*/tools/partitions/boot_app0.bin \
+             s3-blink/boot_app0.bin
+          cp out/Blink.ino.bin             s3-blink/firmware.bin
+          ls -lh s3-blink/
+          sha256sum s3-blink/* > s3-blink/sha256.txt
+          cat s3-blink/sha256.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-blink-bins
+          path: s3-blink/
+          if-no-files-found: error
+          retention-days: 30
