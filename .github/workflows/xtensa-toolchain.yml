@@ -164,7 +164,15 @@ jobs:
           unzip -q ndk.zip
           echo "NDK_ROOT=$RUNNER_TEMP/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
 
+      - name: Cache S3 native cross
+        id: cache-s3-a
+        uses: actions/cache@v4
+        with:
+          path: ~/x-tools/xtensa-esp32s3-elf
+          key: s3-phase-a-esp-13.2.0-20240530-v1
+
       - name: Phase A — native cross (x86_64 → xtensa-esp32s3-elf)
+        if: steps.cache-s3-a.outputs.cache-hit != 'true'
         # No ct-ng sample for S3's gcc-13.2 era; we drive binutils/gcc/newlib
         # directly so phase B can copy target libs out of PHASE_A_PREFIX.
         run: |
@@ -173,7 +181,9 @@ jobs:
           mkdir -p "$PHASE_A_PREFIX"
           chmod +x firmware/toolchain/build-xtensa-s3-phase-a.sh
           firmware/toolchain/build-xtensa-s3-phase-a.sh
-          echo "PHASE_A_PREFIX=$PHASE_A_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Export S3 native cross path
+        run: echo "PHASE_A_PREFIX=$HOME/x-tools/xtensa-esp32s3-elf" >> "$GITHUB_ENV"
 
       - name: Phase B — Canadian cross (aarch64-android → xtensa-esp32s3-elf)
         run: |
