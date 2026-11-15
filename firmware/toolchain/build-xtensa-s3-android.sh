@@ -38,9 +38,9 @@ fi
 # --- Pinned versions (arduino-esp32 3.x era, gcc 13.2) -----------------------
 # These tags track the toolchain that ships with ESP-IDF v5.1.x, which
 # arduino-esp32 3.x is built against. Bump when we move to IDF v5.2+.
-BINUTILS_REF="esp-13.2.0_20240530"
+BINUTILS_REF="esp-2.41.0_20240530"
 GCC_REF="esp-13.2.0_20240530"
-NEWLIB_REF="esp-13.2.0_20240530"
+NEWLIB_REF="esp-4.3.0_20240530"
 GMP_VER="6.3.0"
 MPFR_VER="4.2.1"
 MPC_VER="1.3.1"
@@ -153,16 +153,14 @@ mkdir -p "$BLD/gcc" && cd "$BLD/gcc"
   --with-gnu-ld \
   --with-gnu-as \
   --with-local-prefix="$PREFIX/$TARGET"
-make -j"$JOBS" all-gcc all-target-libgcc || true
 make -j"$JOBS" all-gcc
 make install-gcc
-make install-target-libgcc || true
 
 # --- 3. Strip & package ------------------------------------------------------
 echo "===== strip ====="
-find "$PREFIX/bin" -type f -exec file {} \; | grep -q "ELF 64-bit LSB" || {
-  echo "ERROR: $PREFIX/bin does not contain aarch64 ELF binaries"
-  file "$PREFIX/bin/"* | head
+file "$PREFIX/bin/$TARGET-gcc" | grep -q "ELF 64-bit LSB.*ARM aarch64" || {
+  echo "ERROR: $PREFIX/bin/$TARGET-gcc is not an aarch64 ELF binary"
+  file "$PREFIX/bin/$TARGET-gcc"
   exit 1
 }
 find "$PREFIX" -type f \( -name "*.so*" -o -perm -u+x \) \

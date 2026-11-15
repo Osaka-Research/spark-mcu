@@ -192,8 +192,13 @@ jobs:
       - name: Package tarball
         run: |
           set -euo pipefail
-          cd "$(dirname "$PREFIX")"
-          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" "$(basename "$PREFIX")"
+          test -x "$PREFIX/bin/$TARGET-gcc"
+          test -x "$PREFIX/bin/$TARGET-g++"
+          test -d "$PREFIX/$TARGET/include"
+          test -d "$PREFIX/$TARGET/lib"
+          cd "$PREFIX"
+          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib
+          tar -tJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" | sed -n '1,20p'
           ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"
 
       - name: Upload artifact

@@ -32,7 +32,7 @@ Pins diverge by target:
 | target              | gcc/binutils/newlib ref     | phase-A driver                       |
 |---------------------|-----------------------------|--------------------------------------|
 | xtensa-lx106-elf    | `esp-2021r2-patch5` (gcc 10.3) | `ct-ng xtensa-lx106-elf`             |
-| xtensa-esp32s3-elf  | `esp-13.2.0_20240530` (gcc 13.2) | `build-xtensa-s3-phase-a.sh`         |
+| xtensa-esp32s3-elf  | binutils `esp-2.41.0_20240530`, GCC `esp-13.2.0_20240530`, newlib `esp-4.3.0_20240530` | `build-xtensa-s3-phase-a.sh` |
 
 Everything static. No shared libs — Bionic doesn't have the same dynamic
 linker glibc expects, and we don't want to ship glibc.
