@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -18,6 +20,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,20 +28,30 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.osakaresearch.spark.net.SparkClient
 import com.osakaresearch.spark.net.SparkConnState
+import com.osakaresearch.spark.net.SparkDiscovery
 
 @Composable
 fun ScanScreen() {
     var host by remember { mutableStateOf("spark-mcu.local") }
     var port by remember { mutableStateOf("81") }
     val state by SparkClient.state.collectAsState()
+    val context = LocalContext.current
+    val discovery = remember(context) { SparkDiscovery(context) }
+    val devices by discovery.devices.collectAsState()
+    val discoveryStatus by discovery.status.collectAsState()
+    DisposableEffect(discovery) {
+        discovery.start()
+        onDispose { discovery.stop() }
+    }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(
             "Scan",
             style = MaterialTheme.typography.titleLarge,
@@ -109,13 +122,19 @@ fun ScanScreen() {
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 )
-                Text(
-                    "auto-discovery wiring pending — use manual entry for now.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                )
+                Text(discoveryStatus, fontSize = 12.sp)
+                devices.forEach { device ->
+                    OutlinedButton(onClick = {
+                        host = device.host
+                        port = device.port.toString()
+                        SparkClient.connect(device.host, device.port)
+                    }) { Text("${device.name} · ${device.host}:${device.port}") }
+                }
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        McpStatusCard()
     }
 }
 
