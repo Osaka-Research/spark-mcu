@@ -37,28 +37,40 @@ jobs:
         run: |
           mkdir -p Blink
           cat > Blink/Blink.ino <<'EOF'
-          // Minimal blink for ESP32-S3. Most S3 dev boards (DevKitC-1 and the
-          // bazillion clones) wire the onboard "LED" to a WS2812 on GPIO 48,
-          // which digitalWrite can't drive — it needs a 24-bit colour frame.
-          // When arduino-esp32 detects such a board it defines RGB_BUILTIN;
-          // we branch on that so the same sketch works on plain-GPIO boards.
+          // Belt-and-suspenders blink for an unknown ESP32-S3 board. The default
+          // esp32:esp32:esp32s3 FQBN doesn't define RGB_BUILTIN (it's gated on
+          // a menu option), so a plain LED_BUILTIN sketch silently does nothing
+          // on a DevKitC-1 clone with an onboard WS2812. We drive every likely
+          // onboard-LED pin so at least one blinks regardless of board:
+          //
+          //   48 — DevKitC-1 / most S3 clones (WS2812 data)
+          //   38 — older S3 clones (WS2812 data)
+          //    2 — "classic" Arduino LED pin, some S3 breakouts
+          //   21 — a handful of S3-mini boards
+          //
+          // Also prints to Serial so if nothing blinks we can at least tell
+          // whether the chip is booting at all (open Monitor tab at 115200).
           void setup() {
-          #ifndef RGB_BUILTIN
-            pinMode(LED_BUILTIN, OUTPUT);
-          #endif
+            Serial.begin(115200);
+            pinMode(2, OUTPUT);
+            pinMode(21, OUTPUT);
+            delay(200);
+            Serial.println("spark-blink: boot ok");
           }
+
           void loop() {
-          #ifdef RGB_BUILTIN
-            neopixelWrite(RGB_BUILTIN, 32, 0, 0);  // red
+            neopixelWrite(48, 32, 0, 0);  // red on DevKitC-1
+            neopixelWrite(38, 32, 0, 0);
+            digitalWrite(2, HIGH);
+            digitalWrite(21, HIGH);
+            Serial.println("tick ON");
             delay(500);
-            neopixelWrite(RGB_BUILTIN, 0, 0, 0);
+            neopixelWrite(48, 0, 0, 0);
+            neopixelWrite(38, 0, 0, 0);
+            digitalWrite(2, LOW);
+            digitalWrite(21, LOW);
+            Serial.println("tick off");
             delay(500);
-          #else
-            digitalWrite(LED_BUILTIN, HIGH);
-            delay(500);
-            digitalWrite(LED_BUILTIN, LOW);
-            delay(500);
-          #endif
           }
           EOF
 
