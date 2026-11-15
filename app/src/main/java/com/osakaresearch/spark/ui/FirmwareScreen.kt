@@ -121,6 +121,20 @@ fun FirmwareScreen() {
         }
     }
 
+    // Folder picker: user selects a sketch folder (foo/ with foo.ino + optional
+    // siblings). We stash the tree Uri and defer the actual copy to build time
+    // so the on-disk state always reflects what's being built.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            sketchUri = uri
+            sketchName = androidx.documentfile.provider.DocumentFile
+                .fromTreeUri(context, uri)?.name ?: "sketch/"
+            log = log + "sketch folder: $sketchName"
+        }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -283,6 +297,14 @@ fun FirmwareScreen() {
                         modifier = Modifier.weight(1f),
                     ) { Text("Pick .ino") }
                     Spacer(Modifier.width(10.dp))
+                    OutlinedButton(
+                        onClick = { folderPicker.launch(null) },
+                        enabled = !building,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Pick folder") }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row {
                     Button(
                         onClick = {
                             if (building) return@Button
@@ -290,7 +312,7 @@ fun FirmwareScreen() {
                             scope.launch {
                                 val picked = sketchUri
                                 val ino: File = if (picked != null) {
-                                    val ok = copySketchFromUri(context, picked, sketchName)
+                                    val ok = materializeSketch(context, picked, sketchName)
                                     if (ok == null) {
                                         log = log + "failed to read picked sketch"
                                         building = false
@@ -566,23 +588,38 @@ private fun resolveSketchName(context: android.content.Context, uri: android.net
 }
 
 /**
- * Copies the SAF-picked sketch into the app's private sketches dir so the
- * compile pipeline has a real `java.io.File` to work with. The slug (sketch
- * directory name) is derived from the picked file's basename, sanitized to
- * a conservative character set that's safe as a filesystem path and as a
- * C translation-unit name.
+ * Copies the SAF-picked sketch (either a single-file `.ino` Uri or a tree
+ * Uri from [ActivityResultContracts.OpenDocumentTree]) into the app's
+ * private sketches dir and returns the primary `.ino` file to feed the
+ * compile pipeline.
  *
- * Non-`.ino` files are still accepted — the user may paste a `.cpp` or
- * forget the extension — but we always name the on-disk copy with `.ino`
- * so [SketchBuilder.buildSketch]'s `preprocessIno` recognises it.
+ * Tree copies preserve layout: sibling `.cpp/.h`, a nested `src/` directory,
+ * etc. all land next to the primary `.ino` so [SketchBuilder]'s multi-file
+ * scan picks them up. The primary `.ino` is resolved by matching the folder
+ * basename (Arduino convention: `Blink/Blink.ino`), falling back to the
+ * first `.ino` alphabetically if no match.
+ *
+ * Non-`.ino` single-file picks are accepted — the user may paste a `.cpp`
+ * or forget the extension — but we always name the on-disk copy with
+ * `.ino` so `preprocessSketch` recognises it.
  */
-private fun copySketchFromUri(
+private fun materializeSketch(
     context: android.content.Context,
     uri: android.net.Uri,
     displayName: String,
 ): File? = runCatching {
+    val isTree = android.provider.DocumentsContract.isTreeUri(uri)
+    if (isTree) materializeTree(context, uri, displayName)
+    else materializeSingle(context, uri, displayName)
+}.getOrNull()
+
+private fun materializeSingle(
+    context: android.content.Context,
+    uri: android.net.Uri,
+    displayName: String,
+): File? {
     val baseRaw = displayName.substringBeforeLast('.', displayName).ifBlank { "sketch" }
-    val slug = baseRaw.lowercase().replace(Regex("[^a-z0-9_]+"), "_").trim('_').ifBlank { "sketch" }
+    val slug = slugify(baseRaw)
     val dir = File(context.filesDir, "sketches/$slug").apply {
         deleteRecursively()
         mkdirs()
@@ -590,6 +627,57 @@ private fun copySketchFromUri(
     val out = File(dir, "$slug.ino")
     context.contentResolver.openInputStream(uri)?.use { input ->
         out.outputStream().use { input.copyTo(it) }
-    } ?: return@runCatching null
-    out
-}.getOrNull()
+    } ?: return null
+    return out
+}
+
+private fun materializeTree(
+    context: android.content.Context,
+    tree: android.net.Uri,
+    displayName: String,
+): File? {
+    val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, tree) ?: return null
+    val folderName = doc.name ?: displayName.ifBlank { "sketch" }
+    val slug = slugify(folderName)
+    val dir = File(context.filesDir, "sketches/$slug").apply {
+        deleteRecursively()
+        mkdirs()
+    }
+    copyDocTree(context, doc, dir)
+
+    val inos = dir.listFiles()
+        ?.filter { it.isFile && it.extension.equals("ino", ignoreCase = true) }
+        ?.sortedBy { it.name }
+        .orEmpty()
+    if (inos.isEmpty()) return null
+
+    // Arduino convention: sketch folder and primary .ino share a name.
+    // Match case-insensitively since SAF display names are user-controlled.
+    val primary = inos.firstOrNull { it.nameWithoutExtension.equals(folderName, ignoreCase = true) }
+        ?: inos.first()
+    return primary
+}
+
+private fun copyDocTree(
+    context: android.content.Context,
+    from: androidx.documentfile.provider.DocumentFile,
+    to: File,
+) {
+    for (child in from.listFiles()) {
+        val childName = child.name ?: continue
+        val target = File(to, childName)
+        if (child.isDirectory) {
+            target.mkdirs()
+            copyDocTree(context, child, target)
+        } else {
+            runCatching {
+                context.contentResolver.openInputStream(child.uri)?.use { input ->
+                    target.outputStream().use { input.copyTo(it) }
+                }
+            }
+        }
+    }
+}
+
+private fun slugify(name: String): String =
+    name.lowercase().replace(Regex("[^a-z0-9_]+"), "_").trim('_').ifBlank { "sketch" }

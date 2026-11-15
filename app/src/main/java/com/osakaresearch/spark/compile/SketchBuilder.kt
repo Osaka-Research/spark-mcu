@@ -52,26 +52,38 @@ object SketchBuilder {
             val gpp = Toolchain.bin(ctx, "xtensa-lx106-elf-g++")
             val gcc = Toolchain.bin(ctx, "xtensa-lx106-elf-gcc")
 
-            // 1. .ino → .cpp
+            // 1. scan the sketch folder: merge all .ino files into sketch.cpp
+            // and collect sibling .cpp/.c/.cc/.cxx/.S sources + extra include
+            // dirs (the sketch dir itself, and a src/ subdir if present —
+            // matching Arduino's convention).
             log("preprocess: ${inoFile.name}")
-            val sketchCpp = preprocessIno(inoFile, work)
+            val sketch = preprocessSketch(inoFile, work)
+            if (sketch.inoCount > 1) log("  merged ${sketch.inoCount} .ino files")
+            if (sketch.extraSources.isNotEmpty()) {
+                log("  ${sketch.extraSources.size} sibling source(s)")
+            }
+            val sketchExtraIncludeFlags = sketch.extraIncludeDirs.map { "-I${it.absolutePath}" }
 
             // 2. core.a (cached — usually a no-op)
             log("core.a: ensuring built")
             val coreA = CoreArchive.ensureBuilt(ctx) { log("  $it") }
 
-            // 3. library discovery — walks the sketch's #includes and pulls in
-            // any shipped arduino-core-esp8266 library that provides a matching
-            // header. The resolver walks transitively so a library's own
-            // #includes bring in its deps.
-            val libs = LibraryResolver.resolve(sketchCpp, core) { log("  $it") }
+            // 3. library discovery — walks every sketch source's #includes and
+            // pulls in any shipped arduino-core-esp8266 library that provides a
+            // matching header. The resolver walks transitively so a library's
+            // own #includes bring in its deps.
+            val libSeedFiles = buildList {
+                add(sketch.mergedIno)
+                addAll(sketch.extraSources)
+            }
+            val libs = LibraryResolver.resolve(libSeedFiles, core) { log("  $it") }
             if (libs.sources.isNotEmpty()) {
                 log("libraries: ${libs.includeDirs.size} dir(s), ${libs.sources.size} src(s)")
             }
             val libIncludeFlags = libs.includeDirs.map { "-I${it.absolutePath}" }
 
             // 4. sketch.cpp → sketch.o
-            log("compile: ${sketchCpp.name}")
+            log("compile: ${sketch.mergedIno.name}")
             val sketchObj = File(work, "sketch.cpp.o")
             run {
                 val cmd = buildList {
@@ -79,9 +91,10 @@ object SketchBuilder {
                     add("-B"); add(binDir.absolutePath + "/")
                     addAll(BuildFlags.commonDefines())
                     addAll(BuildFlags.includeDirs(sysroot, core))
+                    addAll(sketchExtraIncludeFlags)
                     addAll(libIncludeFlags)
                     addAll(BuildFlags.cppFlags())
-                    add(sketchCpp.absolutePath)
+                    add(sketch.mergedIno.absolutePath)
                     add("-o"); add(sketchObj.absolutePath)
                 }
                 val (exit, out) = runProcess(cmd, work, binDir)
@@ -89,6 +102,44 @@ object SketchBuilder {
                 if (exit != 0 || !sketchObj.exists()) {
                     return@withContext Result.Fail("sketch compile failed (exit=$exit)", logBuf.toString())
                 }
+            }
+
+            // 4a. compile sibling .cpp/.c/.S sources sitting next to the .ino
+            // (and anything in a src/ subdir). These are linked in alongside
+            // sketch.cpp.o so cross-file references resolve.
+            val sketchObjs = if (sketch.extraSources.isEmpty()) emptyList() else {
+                val siblingDir = File(work, "sketch_siblings").apply { mkdirs() }
+                val objs = mutableListOf<File>()
+                for ((i, src) in sketch.extraSources.withIndex()) {
+                    val obj = File(siblingDir, "${i.toString().padStart(3, '0')}_${src.name}.o")
+                    val (compiler, flags) = when (src.extension.lowercase()) {
+                        "cpp", "cc", "cxx" -> gpp to BuildFlags.cppFlags()
+                        "s" -> gcc to BuildFlags.sFlags()
+                        else -> gcc to BuildFlags.cFlags()
+                    }
+                    val cmd = buildList {
+                        add(compiler.absolutePath)
+                        add("-B"); add(binDir.absolutePath + "/")
+                        addAll(BuildFlags.commonDefines())
+                        addAll(BuildFlags.includeDirs(sysroot, core))
+                        addAll(sketchExtraIncludeFlags)
+                        addAll(libIncludeFlags)
+                        addAll(flags)
+                        add(src.absolutePath)
+                        add("-o"); add(obj.absolutePath)
+                    }
+                    val (exit, out) = runProcess(cmd, work, binDir)
+                    if (exit != 0 || !obj.exists()) {
+                        if (out.isNotBlank()) log(out.trimEnd())
+                        return@withContext Result.Fail(
+                            "sibling compile failed: ${src.name} (exit=$exit)",
+                            logBuf.toString(),
+                        )
+                    }
+                    objs.add(obj)
+                }
+                log("siblings: compiled ${objs.size} obj(s)")
+                objs
             }
 
             // 4b. compile library sources alongside the sketch. Each library
@@ -153,6 +204,7 @@ object SketchBuilder {
                     add("-o"); add(elf.absolutePath)
                     add("-Wl,--start-group")
                     add(sketchObj.absolutePath)
+                    addAll(sketchObjs.map { it.absolutePath })
                     addAll(libObjs.map { it.absolutePath })
                     add(coreA.absolutePath)
                     addAll(BuildFlags.linkLibs())
@@ -259,18 +311,84 @@ object SketchBuilder {
     }
 
     /**
-     * Minimal .ino → .cpp conversion: prepend `#include <Arduino.h>`. Full
-     * arduino-builder also hoists function prototypes above setup/loop so
-     * forward references resolve without manual declarations; that lives in
-     * a follow-up once we hit a sketch that needs it. For Blink-level code
-     * this is sufficient.
+     * Result of scanning a sketch folder: the merged `.cpp` to compile as the
+     * primary TU, the sibling source files that need to be compiled and
+     * linked alongside it, and the include dirs to add to `-I` so cross-file
+     * `#include "foo.h"` resolves.
      */
-    private fun preprocessIno(ino: File, workDir: File): File {
+    private data class SketchSources(
+        val mergedIno: File,
+        val inoCount: Int,
+        val extraSources: List<File>,
+        val extraIncludeDirs: List<File>,
+    )
+
+    /**
+     * Arduino-style multi-file sketch scan.
+     *
+     * The user picks `Sketch/Sketch.ino`; its parent directory may also hold
+     * additional `.ino` files (merged into the same TU as `sketch.cpp`, with
+     * `#line` directives so compile errors still point at the original file)
+     * and sibling `.cpp`/`.c`/`.cc`/`.cxx`/`.S` files (compiled separately
+     * and linked in). An optional `src/` subdirectory is walked recursively
+     * — this mirrors the Arduino IDE convention where everything else in the
+     * sketch folder is treated as data/assets.
+     *
+     * Full arduino-builder also hoists function prototypes above setup/loop
+     * so forward references resolve without manual declarations; that lives
+     * in a follow-up. For sketches that declare helpers before using them
+     * (or declare prototypes explicitly), this is sufficient.
+     */
+    private fun preprocessSketch(primaryIno: File, workDir: File): SketchSources {
+        val sketchDir = primaryIno.parentFile ?: workDir
+
+        // All .ino files in the sketch dir (top level only). Primary first,
+        // then the rest alphabetically — matches the Arduino IDE ordering.
+        val allInos = sketchDir.listFiles()
+            ?.filter { it.isFile && it.extension.equals("ino", ignoreCase = true) }
+            ?.sortedBy { it.name }
+            .orEmpty()
+        val orderedInos = buildList {
+            add(primaryIno)
+            allInos.forEach { if (it != primaryIno && it.absolutePath != primaryIno.absolutePath) add(it) }
+        }
+
         val cpp = File(workDir, "sketch.cpp")
-        val original = ino.readText()
-        val header = "#include <Arduino.h>\n#line 1 \"${ino.absolutePath}\"\n"
-        cpp.writeText(header + original)
-        return cpp
+        val sb = StringBuilder()
+        sb.append("#include <Arduino.h>\n")
+        for (ino in orderedInos) {
+            sb.append("#line 1 \"").append(ino.absolutePath).append("\"\n")
+            sb.append(runCatching { ino.readText() }.getOrDefault(""))
+            if (!sb.endsWith('\n')) sb.append('\n')
+        }
+        cpp.writeText(sb.toString())
+
+        // Sibling sources: top-level + recursive src/**.
+        val siblingExts = setOf("cpp", "cc", "cxx", "c", "s")
+        val extraSources = mutableListOf<File>()
+        sketchDir.listFiles()
+            ?.filter { it.isFile && it.extension.lowercase() in siblingExts }
+            ?.sortedBy { it.name }
+            ?.forEach { extraSources.add(it) }
+        val srcDir = File(sketchDir, "src")
+        if (srcDir.isDirectory) {
+            srcDir.walkTopDown()
+                .filter { it.isFile && it.extension.lowercase() in siblingExts }
+                .sortedBy { it.absolutePath }
+                .forEach { extraSources.add(it) }
+        }
+
+        val includeDirs = buildList {
+            add(sketchDir)
+            if (srcDir.isDirectory) add(srcDir)
+        }
+
+        return SketchSources(
+            mergedIno = cpp,
+            inoCount = orderedInos.size,
+            extraSources = extraSources,
+            extraIncludeDirs = includeDirs,
+        )
     }
 
     /**

@@ -26,7 +26,7 @@ object LibraryResolver {
         Regex("""^\s*#\s*include\s*[<"]([^>"]+)[>"]""", RegexOption.MULTILINE)
 
     fun resolve(
-        sketchSrc: File,
+        sketchSrcs: List<File>,
         coreDir: File,
         onLog: (String) -> Unit = {},
     ): Resolved {
@@ -40,7 +40,7 @@ object LibraryResolver {
         val worklist: ArrayDeque<File> = ArrayDeque()
         val librarySources = linkedSetOf<File>()
 
-        worklist.add(sketchSrc)
+        sketchSrcs.forEach { worklist.add(it) }
         while (worklist.isNotEmpty()) {
             val file = worklist.removeFirst()
             if (!visitedFiles.add(file)) continue
