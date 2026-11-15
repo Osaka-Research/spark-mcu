@@ -48,10 +48,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.osakaresearch.spark.compile.McuTarget
 import com.osakaresearch.spark.compile.SketchBuilder
 import com.osakaresearch.spark.net.FlashResult
 import com.osakaresearch.spark.net.Ota
 import com.osakaresearch.spark.net.OtaResult
+import com.osakaresearch.spark.net.PrecompiledBlobs
 import com.osakaresearch.spark.net.SparkClient
 import com.osakaresearch.spark.net.SparkConnState
 import com.osakaresearch.spark.net.UsbDeviceInfo
@@ -86,6 +88,9 @@ fun FirmwareScreen() {
     var building by remember { mutableStateOf(false) }
     var sketchUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var sketchName by remember { mutableStateOf("") }
+    var target by remember { mutableStateOf(McuTarget.Default) }
+    var blinkFolderUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var blinkFolderName by remember { mutableStateOf("") }
 
     LaunchedEffect(connState) {
         if (hostOverride.isBlank() && connState is SparkConnState.Connected) {
@@ -135,6 +140,20 @@ fun FirmwareScreen() {
         }
     }
 
+    // Separate tree picker for the precompiled S3 Blink folder. Kept distinct
+    // from folderPicker so switching between compile- and precompiled-flows
+    // doesn't clobber either selection.
+    val blinkFolderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            blinkFolderUri = uri
+            blinkFolderName = androidx.documentfile.provider.DocumentFile
+                .fromTreeUri(context, uri)?.name ?: "blink/"
+            log = log + "blink folder: $blinkFolderName"
+        }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -165,6 +184,28 @@ fun FirmwareScreen() {
                 ) { Text(m.label) }
             }
         }
+
+        // Board picker lives at the top because it gates which flash paths
+        // appear below (precompiled-blink only for S3, on-device compile only
+        // where a toolchain is bundled). Users were previously tapping Compile
+        // with target=S3 because the board selector was buried inside the
+        // compile card.
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            McuTarget.values().forEachIndexed { i, t ->
+                SegmentedButton(
+                    selected = target == t,
+                    onClick = { if (!building && !uploading) target = t },
+                    shape = SegmentedButtonDefaults.itemShape(i, McuTarget.values().size),
+                ) { Text(t.label) }
+            }
+        }
+        Text(
+            target.detail,
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(
+                alpha = if (target.available) 0.6f else 0.9f,
+            ),
+        )
 
         when (mode) {
             FlashMode.WIFI -> WifiTarget(
@@ -245,6 +286,7 @@ fun FirmwareScreen() {
                                             },
                                             onLog = { line -> log = log + line },
                                             manualBoot = manualBoot,
+                                            target = target,
                                         )
                                         uploading = false
                                         log = log + when (result) {
@@ -270,21 +312,138 @@ fun FirmwareScreen() {
             }
         }
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(12.dp),
-        ) {
-            Column(Modifier.padding(14.dp)) {
-                Text("Sketch · on-device build", fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
+        // S3 blink validation: lets us exercise the flasher (reset sequence,
+        // image_v2 blobs, multi-offset plan) using arduino-cli output before
+        // the on-phone S3 compile path exists. Shown only when the user has
+        // picked ESP32-S3 + USB mode.
+        if (mode == FlashMode.USB && target == McuTarget.ESP32_S3) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("Precompiled Blink (S3)", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Pick a folder with arduino-cli outputs: bootloader.bin, partitions.bin, boot_app0.bin, firmware.bin. Flashes all four in one session.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    // Inline cheat sheet so the user has the escape hatch in
+                    // view before they tap Flash. The automatic DTR/RTS reset
+                    // doesn't work on every S3 board (some wire BOOT/RST to
+                    // separate buttons with no reset circuit, others have
+                    // firmware that hijacks the USB-JTAG peripheral), so it's
+                    // cheap insurance to always show the manual sequence.
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(
+                                "If SYNC fails: enter download mode manually",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "1.  Hold  BOOT  (or IO0)\n" +
+                                    "2.  Tap   RST   (keep holding BOOT)\n" +
+                                    "3.  Release BOOT\n" +
+                                    "4.  Tap  Flash blink  below within ~3 s",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        if (blinkFolderUri == null) "no folder selected" else blinkFolderName,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row {
+                        OutlinedButton(
+                            onClick = { blinkFolderPicker.launch(null) },
+                            enabled = !uploading,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Pick folder") }
+                        Spacer(Modifier.width(10.dp))
+                        Button(
+                            onClick = {
+                                val uri = blinkFolderUri ?: return@Button
+                                uploading = true
+                                progress = 0f
+                                scope.launch {
+                                    log = log + "loading blobs from $blinkFolderName ..."
+                                    when (val loaded = PrecompiledBlobs.loadS3Blink(context, uri)) {
+                                        is PrecompiledBlobs.Loaded.Missing -> {
+                                            log = log + "missing: ${loaded.names.joinToString()}"
+                                            uploading = false
+                                        }
+                                        is PrecompiledBlobs.Loaded.Error -> {
+                                            log = log + "load failed: ${loaded.reason}"
+                                            uploading = false
+                                        }
+                                        is PrecompiledBlobs.Loaded.Ok -> {
+                                            loaded.plan.forEach { b ->
+                                                log = log + "  ${b.name} @ 0x${b.offset.toString(16)} (${b.data.size} bytes)"
+                                            }
+                                            val result = UsbFlasher.flashPlan(
+                                                context = context,
+                                                plan = loaded.plan,
+                                                onProgress = { done, total ->
+                                                    progress = if (total > 0) done.toFloat() / total.toFloat() else 0f
+                                                },
+                                                onLog = { line -> log = log + line },
+                                                manualBoot = manualBoot,
+                                                target = target,
+                                            )
+                                            uploading = false
+                                            log = log + when (result) {
+                                                is FlashResult.Ok -> "ok: ${result.bytes} bytes · ${result.blocks} blocks"
+                                                is FlashResult.Fail -> "failed: ${result.reason}"
+                                            }
+                                            usbRefreshTick++
+                                        }
+                                    }
+                                }
+                            },
+                            enabled = !uploading && blinkFolderUri != null && usbDevices.isNotEmpty(),
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (uploading) "Working" else "Flash blink") }
+                    }
+                }
+            }
+        }
+
+        // Compile card hidden for targets with no on-device toolchain yet —
+        // S3 users should use the precompiled-blink card above instead of
+        // tapping a Compile button that always fails.
+        if (target.available) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("Sketch · on-device build", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Compile an .ino with the bundled xtensa toolchain. First run builds core.a (~2–4 min); subsequent runs are fast. Libraries shipped with the core (ESP8266WiFi, Servo, SPI, Wire, …) are auto-resolved by #include.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
                     if (sketchUri == null) "no sketch selected (demo Blink will be used)" else sketchName,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
@@ -326,8 +485,8 @@ fun FirmwareScreen() {
                                     }
                                 }
                                 val slug = ino.nameWithoutExtension
-                                log = log + "compiling ${ino.name} ..."
-                                val result = SketchBuilder.buildSketch(context, ino) { line ->
+                                log = log + "compiling ${ino.name} for ${target.label} ..."
+                                val result = SketchBuilder.buildSketch(context, ino, target) { line ->
                                     log = log + line
                                 }
                                 log = log + when (result) {
@@ -358,6 +517,7 @@ fun FirmwareScreen() {
                     ) { Text(if (building) "Building" else "Compile") }
                 }
             }
+          }
         }
 
         Card(

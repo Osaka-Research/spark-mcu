@@ -8,31 +8,28 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Compiles arduino-core-esp8266 `cores/esp8266` plus the selected variant
- * into a single static archive, then caches it under `filesDir/build/core/`.
+ * Compiles the per-target Arduino core (e.g. arduino-core-esp8266
+ * `cores/esp8266`) plus the selected variant into a single static archive,
+ * then caches it under `filesDir/build/core/<target.id>/`.
  *
  * The compile is slow (~2–4 min on-phone, ~100 TUs). The cache key is the
  * toolchain VERSION + the flags digest + the set of core source paths, so
  * bumping Toolchain.VERSION or changing BuildFlags invalidates it cleanly.
+ *
+ * Cache is target-keyed so swapping between ESP8266 and ESP32-S3 doesn't
+ * trash the other's prebuild.
  */
 object CoreArchive {
 
     private const val SUBDIR = "build/core"
     private const val STAMP = ".built"
 
-    /**
-     * Source filenames whose `.o` names the LD script matches by exact basename
-     * (via `EXCLUDE_FILE (...)`). These must be archived under their natural
-     * name — any prefix would silently misroute them. umm_malloc is the only
-     * one in the arduino-core-esp8266 3.1.2 linker script today; extend here
-     * if we pick up new EXCLUDE_FILE entries on a core bump.
-     */
-    private val LD_EXACT_MATCH_SOURCES = setOf("umm_malloc.cpp")
-
     private val buildMutex = Mutex()
 
-    private fun root(ctx: Context): File = File(ctx.filesDir, SUBDIR)
-    fun archive(ctx: Context): File = File(root(ctx), "core.a")
+    private fun root(ctx: Context, target: McuTarget): File =
+        File(ctx.filesDir, "$SUBDIR/${target.id}")
+    fun archive(ctx: Context, target: McuTarget = McuTarget.Default): File =
+        File(root(ctx, target), "core.a")
 
     /**
      * Returns the cached core.a if its stamp matches the current key;
@@ -40,15 +37,16 @@ object CoreArchive {
      */
     suspend fun ensureBuilt(
         ctx: Context,
+        target: McuTarget = McuTarget.Default,
         onLog: (String) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
         buildMutex.withLock {
             Toolchain.ensurePrepared(ctx)
 
-            val root = root(ctx).apply { mkdirs() }
+            val root = root(ctx, target).apply { mkdirs() }
             val stamp = File(root, STAMP)
-            val key = cacheKey(ctx)
-            val archive = archive(ctx)
+            val key = cacheKey(target)
+            val archive = archive(ctx, target)
 
             if (archive.exists() && stamp.exists() && stamp.readText().trim() == key) {
                 onLog("core.a cached (${archive.length()} bytes)")
@@ -59,14 +57,14 @@ object CoreArchive {
             root.deleteRecursively(); root.mkdirs()
             val objsDir = File(root, "objs").apply { mkdirs() }
 
-            val gcc = Toolchain.bin(ctx, "xtensa-lx106-elf-gcc")
-            val gpp = Toolchain.bin(ctx, "xtensa-lx106-elf-g++")
-            val ar = Toolchain.bin(ctx, "xtensa-lx106-elf-ar")
+            val gcc = Toolchain.bin(ctx, "${target.toolchainTriple}-gcc")
+            val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++")
+            val ar = Toolchain.bin(ctx, "${target.toolchainTriple}-ar")
             val binDir = Toolchain.binDir(ctx)
             val sysroot = Toolchain.sysroot(ctx)
             val core = Toolchain.coreDir(ctx)
 
-            val sources = collectCoreSources(core)
+            val sources = collectCoreSources(core, target)
             onLog("found ${sources.size} core source files")
 
             val objs = mutableListOf<File>()
@@ -85,7 +83,7 @@ object CoreArchive {
                 // the EXCLUDE_FILE pattern miss, silently drops umm_malloc into
                 // `.irom0.text`, and produces the epc1=0x402020ec boot loop the
                 // moment the SDK first touches heap from an ISR path.
-                val keepExactName = src.name in LD_EXACT_MATCH_SOURCES
+                val keepExactName = src.name in target.ldExactMatchSources
                 val obj = if (keepExactName) {
                     File(objsDir, "${src.name}.o")
                 } else {
@@ -138,11 +136,13 @@ object CoreArchive {
         }
     }
 
-    private fun collectCoreSources(coreDir: File): List<File> {
-        val base = File(coreDir, "cores/esp8266")
-        val variant = File(coreDir, "variants/${BuildFlags.VARIANT}")
+    private fun collectCoreSources(coreDir: File, target: McuTarget): List<File> {
+        val (baseSubdir, variantSubdir) = when (target) {
+            McuTarget.ESP8266_NODEMCU -> "cores/esp8266" to "variants/${BuildFlags.VARIANT}"
+            McuTarget.ESP32_S3 -> "cores/esp32" to "variants/esp32s3"
+        }
         val out = mutableListOf<File>()
-        for (root in listOf(base, variant)) {
+        for (root in listOf(File(coreDir, baseSubdir), File(coreDir, variantSubdir))) {
             if (!root.isDirectory) continue
             root.walkTopDown()
                 .filter { it.isFile && it.extension.lowercase() in setOf("c", "cpp", "cc", "cxx", "s") }
@@ -151,16 +151,16 @@ object CoreArchive {
         return out.sortedBy { it.absolutePath }
     }
 
-    private fun cacheKey(ctx: Context): String {
+    private fun cacheKey(target: McuTarget): String {
         // Toolchain version + flag digest. Source-path set changes are implicit
         // in VERSION bumps since sources ship as assets keyed by VERSION.
         // SCHEMA bump invalidates caches when the object-naming scheme or
         // archive layout changes without any flag/toolchain delta.
-        val schema = 3
+        val schema = 4
         val flags = (BuildFlags.commonDefines() +
             BuildFlags.cFlags() + BuildFlags.cppFlags() + BuildFlags.sFlags())
             .joinToString("|")
-        return "tcv=${Toolchain.versionTag()};schema=$schema;flags=${flags.hashCode().toString(16)}"
+        return "tcv=${Toolchain.versionTag()};tgt=${target.id};schema=$schema;flags=${flags.hashCode().toString(16)}"
     }
 
     private fun runProcess(

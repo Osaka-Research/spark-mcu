@@ -11,6 +11,7 @@ import android.os.Build
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
+import com.osakaresearch.spark.compile.McuTarget
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -30,6 +31,17 @@ data class UsbDeviceInfo(
     val hasPermission: Boolean,
 )
 
+/** One blob in a multi-image flash plan (e.g. bootloader + partitions + app). */
+data class FlashBlob(val name: String, val offset: Int, val data: ByteArray) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is FlashBlob) return false
+        return name == other.name && offset == other.offset && data.contentEquals(other.data)
+    }
+    override fun hashCode(): Int =
+        name.hashCode() * 31 * 31 + offset * 31 + data.contentHashCode()
+}
+
 object UsbFlasher {
     private const val ACTION_USB_PERMISSION = "com.osakaresearch.spark.USB_PERMISSION"
 
@@ -41,6 +53,12 @@ object UsbFlasher {
     private const val CMD_FLASH_DATA: Byte = 0x03
     private const val CMD_FLASH_END: Byte = 0x04
     private const val CMD_SYNC: Byte = 0x08
+
+    // Espressif's VID for the ESP32-S3 (and S2/C3/C6/H2) built-in USB-JTAG-serial
+    // interface. When the device is attached via this interface rather than an
+    // external bridge (CP2102=0x10C4, CH340=0x1A86), DTR/RTS semantics change
+    // — see s3UsbJtagReset.
+    private const val VID_ESPRESSIF_USB_JTAG = 0x303A
 
     fun listDevices(context: Context): List<UsbDeviceInfo> {
         val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -56,6 +74,7 @@ object UsbFlasher {
         }
     }
 
+    /** Single-blob flash — reads the uri and dispatches through [flashPlan]. */
     suspend fun flash(
         context: Context,
         firmwareUri: Uri,
@@ -63,7 +82,42 @@ object UsbFlasher {
         onProgress: (Long, Long) -> Unit,
         onLog: (String) -> Unit,
         manualBoot: Boolean = false,
+        target: McuTarget = McuTarget.Default,
     ): FlashResult = withContext(Dispatchers.IO) {
+        val data = runCatching { readAll(context, firmwareUri) }.getOrElse {
+            return@withContext FlashResult.Fail("cannot read firmware: ${it.message}")
+        }
+        if (data.isEmpty()) return@withContext FlashResult.Fail("empty firmware file")
+        flashPlan(
+            context = context,
+            plan = listOf(FlashBlob("firmware", offset, data)),
+            onProgress = onProgress,
+            onLog = onLog,
+            manualBoot = manualBoot,
+            target = target,
+        )
+    }
+
+    /**
+     * Flashes a sequence of blobs at distinct offsets within a single bootROM
+     * session: one reset + SYNC, then one FLASH_BEGIN/DATA per blob, then one
+     * FLASH_END to boot. Used for ESP32-family targets that want bootloader +
+     * partitions + boot_app0 + app across four offsets, but also degenerates
+     * cleanly to the single-blob case.
+     *
+     * Progress is reported as cumulative-bytes / total-bytes across the plan,
+     * so the caller can drive a single progress bar.
+     */
+    suspend fun flashPlan(
+        context: Context,
+        plan: List<FlashBlob>,
+        onProgress: (Long, Long) -> Unit,
+        onLog: (String) -> Unit,
+        manualBoot: Boolean = false,
+        target: McuTarget = McuTarget.Default,
+    ): FlashResult = withContext(Dispatchers.IO) {
+        if (plan.isEmpty()) return@withContext FlashResult.Fail("empty flash plan")
+
         val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager).firstOrNull()
             ?: return@withContext FlashResult.Fail("no USB serial device found")
@@ -83,28 +137,58 @@ object UsbFlasher {
         try {
             port.open(connection)
             port.setParameters(BAUD, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            port.purgeHwBuffers(true, true)
+            // Best-effort — CdcAcmSerialDriver (used by the S3 native USB-JTAG
+            // interface) throws UnsupportedOperationException since CDC-ACM
+            // has no host-side hardware FIFO to flush.
+            try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
 
-            val firmware = readAll(context, firmwareUri)
-            if (firmware.isEmpty()) return@withContext FlashResult.Fail("empty firmware file")
-            onLog("firmware: ${firmware.size} bytes @ offset 0x${Integer.toHexString(offset)}")
+            val totalBytes = plan.sumOf { it.data.size.toLong() }
+            onLog("plan: ${plan.size} blob(s), $totalBytes bytes total")
+            for (b in plan) {
+                onLog("  ${b.name}: ${b.data.size} B @ 0x${Integer.toHexString(b.offset)}")
+            }
 
+            val nativeUsbJtag = driver.device.vendorId == VID_ESPRESSIF_USB_JTAG
+            val resetKind = when {
+                manualBoot -> "manual"
+                target == McuTarget.ESP32_S3 && nativeUsbJtag -> "s3-usb-jtag"
+                else -> "classic"
+            }
+
+            // Order: try SYNC bare first, then fall back to reset + SYNC.
+            //
+            // Why: an S3 that has never been flashed (or was most recently in
+            // the bootROM) is already parked in download mode when its native
+            // USB-JTAG-serial enumerates, so SYNC answers immediately. Pulsing
+            // DTR/RTS at that point causes the usb_serial_jtag peripheral to
+            // tear the USB link down and bring it back up, which (a) invalidates
+            // our open port handle for a window and (b) wastes seconds.
+            //
+            // For a chip already running user firmware, bare SYNC fails fast
+            // and we fall through to the real reset pulse.
             if (manualBoot) {
-                // Skip auto-reset: user has already driven GPIO0/EN manually
-                // (e.g. hold FLASH + tap RST). Toggling DTR/RTS now would
-                // bounce the chip back out of the bootROM download mode.
                 onLog("manual boot mode: skipping DTR/RTS reset pulse")
             } else {
-                onLog("resetting chip into bootloader ...")
-                classicReset(port)
+                onLog("trying SYNC bare (chip may already be in download mode) ...")
             }
 
             onLog("SYNC ...")
             var synced = false
-            for (attempt in 1..SYNC_ATTEMPTS) {
+            val bareAttempts = if (manualBoot) SYNC_ATTEMPTS else 3
+            for (attempt in 1..bareAttempts) {
                 if (trySync(port)) { synced = true; break }
                 onLog("  sync attempt $attempt failed")
-                if (!manualBoot) classicReset(port)
+            }
+            if (!synced && !manualBoot) {
+                onLog("bare sync failed — pulsing reset ($resetKind) and retrying ...")
+                reset(port, resetKind)
+                // Give the USB-JTAG peripheral time to come back up after the
+                // reset pulse before we start writing SYNC frames at it.
+                delay(200)
+                for (attempt in 1..SYNC_ATTEMPTS) {
+                    if (trySync(port)) { synced = true; break }
+                    onLog("  post-reset sync attempt $attempt failed")
+                }
             }
             if (!synced) return@withContext FlashResult.Fail("chip did not respond to SYNC")
             onLog("sync ok")
@@ -113,34 +197,41 @@ object UsbFlasher {
             try { readSlipFrame(port, 100) } catch (_: Throwable) {}
             try { readSlipFrame(port, 100) } catch (_: Throwable) {}
 
-            val numBlocks = (firmware.size + BLOCK_SIZE - 1) / BLOCK_SIZE
-            val eraseSize = firmware.size
-            onLog("FLASH_BEGIN: $numBlocks blocks, erase=$eraseSize")
+            var bytesDone = 0L
+            var totalBlocks = 0
+            for (blob in plan) {
+                val data = blob.data
+                val numBlocks = (data.size + BLOCK_SIZE - 1) / BLOCK_SIZE
+                val eraseSize = data.size
+                onLog("FLASH_BEGIN ${blob.name}: $numBlocks blocks @ 0x${Integer.toHexString(blob.offset)}")
 
-            val beginPayload = ByteArrayOutputStream().apply {
-                writeU32LE(eraseSize)
-                writeU32LE(numBlocks)
-                writeU32LE(BLOCK_SIZE)
-                writeU32LE(offset)
-            }.toByteArray()
-            command(port, CMD_FLASH_BEGIN, beginPayload, 0, timeoutMs = 10_000)
-
-            for (seq in 0 until numBlocks) {
-                val start = seq * BLOCK_SIZE
-                val end = minOf(start + BLOCK_SIZE, firmware.size)
-                val chunk = ByteArray(BLOCK_SIZE) { 0xFF.toByte() }
-                System.arraycopy(firmware, start, chunk, 0, end - start)
-
-                val payload = ByteArrayOutputStream().apply {
+                val beginPayload = ByteArrayOutputStream().apply {
+                    writeU32LE(eraseSize)
+                    writeU32LE(numBlocks)
                     writeU32LE(BLOCK_SIZE)
-                    writeU32LE(seq)
-                    writeU32LE(0)
-                    writeU32LE(0)
-                    write(chunk)
+                    writeU32LE(blob.offset)
                 }.toByteArray()
-                val checksum = checksum(chunk)
-                command(port, CMD_FLASH_DATA, payload, checksum, timeoutMs = 3_000)
-                onProgress((end).toLong(), firmware.size.toLong())
+                command(port, CMD_FLASH_BEGIN, beginPayload, 0, timeoutMs = 10_000)
+
+                for (seq in 0 until numBlocks) {
+                    val start = seq * BLOCK_SIZE
+                    val end = minOf(start + BLOCK_SIZE, data.size)
+                    val chunk = ByteArray(BLOCK_SIZE) { 0xFF.toByte() }
+                    System.arraycopy(data, start, chunk, 0, end - start)
+
+                    val payload = ByteArrayOutputStream().apply {
+                        writeU32LE(BLOCK_SIZE)
+                        writeU32LE(seq)
+                        writeU32LE(0)
+                        writeU32LE(0)
+                        write(chunk)
+                    }.toByteArray()
+                    val checksum = checksum(chunk)
+                    command(port, CMD_FLASH_DATA, payload, checksum, timeoutMs = 3_000)
+                    onProgress(bytesDone + end, totalBytes)
+                }
+                bytesDone += data.size
+                totalBlocks += numBlocks
             }
 
             onLog("FLASH_END, rebooting ...")
@@ -151,7 +242,7 @@ object UsbFlasher {
                 // Some ROMs reset before responding — treat as success
             }
 
-            FlashResult.Ok(firmware.size.toLong(), numBlocks)
+            FlashResult.Ok(bytesDone, totalBlocks)
         } catch (t: Throwable) {
             FlashResult.Fail(t.message ?: t.javaClass.simpleName)
         } finally {
@@ -190,15 +281,44 @@ object UsbFlasher {
         }
     }
 
+    private suspend fun reset(port: UsbSerialPort, kind: String) {
+        when (kind) {
+            "s3-usb-jtag" -> s3UsbJtagReset(port)
+            else -> classicReset(port)
+        }
+    }
+
     private suspend fun classicReset(port: UsbSerialPort) {
-        // ESP reset wiring: RTS -> EN (active high = reset), DTR -> IO0 (active high = pulled low)
+        // ESP reset wiring via CP2102/CH340: RTS -> EN (active high = reset),
+        // DTR -> IO0 (active high = pulled low).
         port.dtr = false; port.rts = true     // EN low, chip in reset
         delay(100)
         port.dtr = true; port.rts = false     // EN high, IO0 held low (boot)
         delay(50)
         port.dtr = false                       // release IO0
         delay(50)
-        port.purgeHwBuffers(true, true)
+        try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
+    }
+
+    private suspend fun s3UsbJtagReset(port: UsbSerialPort) {
+        // ESP32-S3 (and S2/C3/C6/H2) native USB-JTAG-serial reset.
+        //
+        // On native USB CDC, DTR/RTS are routed through the chip's built-in
+        // USB-serial-JTAG peripheral, which inverts the polarity vs the
+        // CP2102 wiring: DTR *low* holds IO0 low, RTS *low* holds EN low.
+        // Also, a stray DTR=low at open can latch the chip in download mode
+        // forever, so the sequence resets both lines to high first.
+        //
+        // Mirrors esptool.py's HardReset.usb_jtag_serial_reset.
+        port.dtr = false; port.rts = false   // IO0=HIGH, EN=HIGH (idle)
+        delay(100)
+        port.dtr = true;  port.rts = false   // IO0=LOW  (will stay low across reset)
+        port.dtr = false; port.rts = true    // IO0=HIGH, EN=LOW  (begin reset)
+        delay(100)
+        port.dtr = true;  port.rts = false   // IO0=LOW,  EN=HIGH (exit reset with IO0 held low -> bootROM)
+        delay(100)
+        port.dtr = false                      // release IO0
+        try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
     }
 
     private fun trySync(port: UsbSerialPort): Boolean {

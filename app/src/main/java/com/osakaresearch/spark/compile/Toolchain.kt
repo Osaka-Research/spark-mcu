@@ -101,11 +101,11 @@ object Toolchain {
     }
 
     private fun looksLikeToolchainBinary(unprefixed: String): Boolean {
-        // Matches the names produced by firmware/bootstrap/extract-arduinodroid.sh:
-        // xtensa-lx106-elf-{gcc,g++,ar,objcopy,objdump,readelf,size}
-        // plus gcc helpers: as, ld, cc1, cc1plus, collect2
-        return unprefixed.startsWith("xtensa-lx106-elf-") ||
-            unprefixed in setOf("as", "ld", "cc1", "cc1plus", "collect2")
+        // Matches target cross-tools (xtensa-*-elf-{gcc,g++,ar,objcopy,...})
+        // plus gcc helpers (as, ld, cc1, cc1plus, collect2). The prefix set
+        // widens as new McuTargets land — see McuTarget.toolchainTriple.
+        if (unprefixed in setOf("as", "ld", "cc1", "cc1plus", "collect2")) return true
+        return McuTarget.values().any { unprefixed.startsWith("${it.toolchainTriple}-") }
     }
 
     private fun copyAssetTree(ctx: Context, assetPath: String, outDir: File) {

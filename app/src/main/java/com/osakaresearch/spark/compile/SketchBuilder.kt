@@ -35,10 +35,17 @@ object SketchBuilder {
     suspend fun buildSketch(
         ctx: Context,
         inoFile: File,
+        target: McuTarget = McuTarget.Default,
         onLog: (String) -> Unit = {},
     ): Result = withContext(Dispatchers.IO) {
         val logBuf = StringBuilder()
         fun log(line: String) { onLog(line); logBuf.appendLine(line) }
+
+        if (!target.available) {
+            val msg = "target '${target.label}' is not available yet: ${target.detail}"
+            log(msg)
+            return@withContext Result.Fail(msg, logBuf.toString())
+        }
 
         try {
             Toolchain.ensurePrepared(ctx)
@@ -66,7 +73,7 @@ object SketchBuilder {
 
             // 2. core.a (cached — usually a no-op)
             log("core.a: ensuring built")
-            val coreA = CoreArchive.ensureBuilt(ctx) { log("  $it") }
+            val coreA = CoreArchive.ensureBuilt(ctx, target) { log("  $it") }
 
             // 3. library discovery — walks every sketch source's #includes and
             // pulls in any shipped arduino-core-esp8266 library that provides a
