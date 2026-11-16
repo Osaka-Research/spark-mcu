@@ -4,8 +4,10 @@ import android.content.Context
 import android.net.Uri
 import com.osakaresearch.spark.compile.McuTarget
 import com.osakaresearch.spark.compile.SketchBuilder
+import com.osakaresearch.spark.compile.Toolchain
 import com.osakaresearch.spark.net.FlashBlob
 import com.osakaresearch.spark.net.FlashResult
+import com.osakaresearch.spark.net.PrecompiledBlobs
 import com.osakaresearch.spark.net.UsbFlasher
 import com.osakaresearch.spark.net.UsbSerialMonitor
 import kotlinx.coroutines.CoroutineScope
@@ -83,7 +85,7 @@ class McpBridge(private val appCtx: Context) {
                 val sha = sha256Hex(bytes)
                 val cacheDir = File(appCtx.filesDir, "mcp/builds").apply { mkdirs() }
                 val cached = File(cacheDir, "$sha.bin").also { bin.copyTo(it, overwrite = true) }
-                builds[sha] = cached
+                builds[sha] = BuildArtifact(cached, target)
                 CompileOk(
                     buildId = sha,
                     binPath = cached.absolutePath,
@@ -109,9 +111,14 @@ class McpBridge(private val appCtx: Context) {
         manualBoot: Boolean,
     ): Any {
         val target = McuTarget.byId(targetId)
+        val artifact = if (!buildId.isNullOrBlank()) {
+            builds[buildId] ?: return FlashErr("unknown buildId $buildId", "")
+        } else null
+        if (artifact != null && artifact.target != target) {
+            return FlashErr("buildId was compiled for ${artifact.target.label}, not ${target.label}", "")
+        }
         val file: File = when {
-            !buildId.isNullOrBlank() -> builds[buildId]
-                ?: return FlashErr("unknown buildId $buildId", "")
+            artifact != null -> artifact.file
             binBytes != null && binBytes.isNotEmpty() -> {
                 val adhoc = File(appCtx.filesDir, "mcp/adhoc.bin")
                 adhoc.parentFile?.mkdirs()
@@ -121,9 +128,28 @@ class McpBridge(private val appCtx: Context) {
             else -> return FlashErr("neither buildId nor bin provided", "")
         }
         val logBuf = StringBuilder()
-        val res = UsbFlasher.flash(
+        val firmwareUri = Uri.fromFile(file)
+        val res = if (artifact != null && target == McuTarget.ESP32_S3) {
+            // A freshly compiled S3 app needs the matching bootloader and
+            // partition images. Mirror the Firmware screen's four-blob path.
+            when (val loaded = PrecompiledBlobs.loadS3Bundled(
+                appCtx, firmwareUri, Toolchain.coreDir(appCtx, target)
+            )) {
+                is PrecompiledBlobs.Loaded.Ok -> UsbFlasher.flashPlan(
+                    context = appCtx,
+                    plan = loaded.plan,
+                    onProgress = { _, _ -> },
+                    onLog = { logBuf.appendLine(it) },
+                    manualBoot = manualBoot,
+                    target = target,
+                )
+                is PrecompiledBlobs.Loaded.Missing ->
+                    FlashResult.Fail("bundled S3 image missing: ${loaded.names.joinToString()}")
+                is PrecompiledBlobs.Loaded.Error -> FlashResult.Fail(loaded.reason)
+            }
+        } else UsbFlasher.flash(
             context = appCtx,
-            firmwareUri = Uri.fromFile(file),
+            firmwareUri = firmwareUri,
             offset = offset,
             onProgress = { _, _ -> },
             onLog = { logBuf.appendLine(it) },
@@ -210,7 +236,8 @@ class McpBridge(private val appCtx: Context) {
         return SerialBatch(cursor = last, lines = out)
     }
 
-    private val builds = HashMap<String, File>()
+    private data class BuildArtifact(val file: File, val target: McuTarget)
+    private val builds = HashMap<String, BuildArtifact>()
 
     private fun sha256Hex(data: ByteArray): String {
         val md = MessageDigest.getInstance("SHA-256")

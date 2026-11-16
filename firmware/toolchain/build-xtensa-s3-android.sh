@@ -62,9 +62,11 @@ export RANLIB="$NDK_BIN/llvm-ranlib"
 export STRIP="$NDK_BIN/llvm-strip"
 export LD="$NDK_BIN/ld.lld"
 
-export CFLAGS="-O2 -fPIC"
-export CXXFLAGS="-O2 -fPIC"
-export LDFLAGS=""
+# Android refuses ET_EXEC binaries. Host-side gcc/binutils must be PIE even
+# though their Xtensa target output is ordinary bare-metal code.
+export CFLAGS="-O2 -fPIE"
+export CXXFLAGS="-O2 -fPIE"
+export LDFLAGS="-pie"
 
 # Phase-A target compiler on PATH so Canadian stage can produce target libs.
 export PATH="$PHASE_A_PREFIX/bin:$PATH"
@@ -163,6 +165,10 @@ echo "===== strip ====="
 file "$PREFIX/bin/$TARGET-gcc" | grep -q "ELF 64-bit LSB.*ARM aarch64" || {
   echo "ERROR: $PREFIX/bin/$TARGET-gcc is not an aarch64 ELF binary"
   file "$PREFIX/bin/$TARGET-gcc"
+  exit 1
+}
+readelf -h "$PREFIX/bin/$TARGET-gcc" | grep -q 'Type:.*DYN' || {
+  echo "ERROR: $PREFIX/bin/$TARGET-gcc is not Android-compatible PIE" >&2
   exit 1
 }
 find "$PREFIX" -type f \( -name "*.so*" -o -perm -u+x \) \

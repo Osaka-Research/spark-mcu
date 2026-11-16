@@ -49,10 +49,10 @@ export STRIP="$NDK_BIN/llvm-strip"
 export LD="$NDK_BIN/ld.lld"
 
 # Bionic doesn't ship iconv, libintl — keep the build lean.
-export CFLAGS="-O2 -fPIC"
-export CXXFLAGS="-O2 -fPIC"
+export CFLAGS="-O2 -fPIE"
+export CXXFLAGS="-O2 -fPIE"
 # Bionic's pthread is baked into libc; no -lpthread needed, but harmless.
-export LDFLAGS=""
+export LDFLAGS="-pie"
 
 # Also need the phase-A target compiler on PATH to generate target libs.
 export PATH="$PHASE_A_PREFIX/bin:$PATH"

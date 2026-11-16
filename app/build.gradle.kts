@@ -141,13 +141,48 @@ tasks.register("extractS3Toolchain") {
         val stage = File(toolchainCacheDir, "stage-s3").apply {
             deleteRecursively(); mkdirs()
         }
-        exec { commandLine("tar", "-xJf", tarball.absolutePath, "-C", stage.absolutePath) }
+        // Android app-private storage rejects hard links. The cached GCC
+        // archive has a few alias entries, so extract their targets and copy
+        // the aliases as ordinary files after tar finishes.
+        val hardLinkAliases = mapOf(
+            "bin/xtensa-esp32s3-elf-gcc-13.2.0" to "bin/xtensa-esp32s3-elf-gcc",
+            "bin/xtensa-esp32s3-elf-ld" to "bin/xtensa-esp32s3-elf-ld.bfd",
+            "bin/xtensa-esp32s3-elf-c++" to "bin/xtensa-esp32s3-elf-g++",
+            "xtensa-esp32s3-elf/lib/libg.a" to "xtensa-esp32s3-elf/lib/libc.a",
+            "xtensa-esp32s3-elf/bin/ld" to "xtensa-esp32s3-elf/bin/ld.bfd",
+        )
+        exec {
+            commandLine(
+                listOf("tar") + hardLinkAliases.keys.map { "--exclude=$it" } +
+                    listOf("-xJf", tarball.absolutePath, "-C", stage.absolutePath)
+            )
+        }
+        hardLinkAliases.forEach { (alias, original) ->
+            val source = File(stage, original)
+            if (source.isFile) {
+                val destination = File(stage, alias)
+                destination.parentFile?.mkdirs()
+                source.copyTo(destination, overwrite = true)
+                destination.setExecutable(source.canExecute())
+            }
+        }
         val target = "xtensa-esp32s3-elf"
         val binDir = File(stage, "bin")
         val targetDir = File(stage, target)
         val coreDir = File(stage, "arduino-core-esp32")
         if (!binDir.isDirectory || !targetDir.isDirectory || !coreDir.isDirectory) {
             throw GradleException("S3 tarball needs bin/, $target/, and arduino-core-esp32/ at root")
+        }
+        val gcc = File(binDir, "$target-gcc")
+        val elfHeader = gcc.inputStream().use { it.readNBytes(20) }
+        val isPie = elfHeader.size >= 20 &&
+            elfHeader[0] == 0x7f.toByte() &&
+            elfHeader[1] == 'E'.code.toByte() &&
+            elfHeader[2] == 'L'.code.toByte() &&
+            elfHeader[3] == 'F'.code.toByte() &&
+            elfHeader[16] == 3.toByte() && elfHeader[17] == 0.toByte()
+        if (!isPie) {
+            throw GradleException("S3 toolchain gcc is not an Android-compatible PIE executable; rebuild the archive with -fPIE -pie")
         }
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")

@@ -14,6 +14,11 @@ name: xtensa toolchain (Android host)
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: "Toolchain to build"
+        type: choice
+        options: [s3, lx106, all]
+        default: s3
       upload_release:
         description: "Attach tarball to a GitHub release"
         type: boolean
@@ -38,6 +43,7 @@ env:
 
 jobs:
   build-lx106:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'lx106'
     runs-on: ubuntu-22.04
     env:
       TARGET: "xtensa-lx106-elf"
@@ -138,6 +144,7 @@ jobs:
           fail_on_unmatched_files: true
 
   build-s3:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 's3'
     runs-on: ubuntu-22.04
     env:
       TARGET: "xtensa-esp32s3-elf"
@@ -211,7 +218,7 @@ jobs:
           test -d "$PREFIX/$TARGET/lib"
           cd "$PREFIX"
           test -f "$PREFIX/arduino-core-esp32/prebuilt/core.a"
-          tar -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32
+          tar --hard-dereference -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32
           tar -tJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" | sed -n '1,20p'
           ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"
 
