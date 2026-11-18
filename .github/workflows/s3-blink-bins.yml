@@ -64,13 +64,13 @@ jobs:
             digitalWrite(2, HIGH);
             digitalWrite(21, HIGH);
             Serial.println("tick ON");
-            delay(500);
+            delay(100);
             neopixelWrite(48, 0, 0, 0);
             neopixelWrite(38, 0, 0, 0);
             digitalWrite(2, LOW);
             digitalWrite(21, LOW);
             Serial.println("tick off");
-            delay(500);
+            delay(100);
           }
           EOF
 
