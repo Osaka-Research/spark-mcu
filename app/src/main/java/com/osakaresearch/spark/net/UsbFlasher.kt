@@ -24,6 +24,11 @@ sealed class FlashResult {
     data class Fail(val reason: String) : FlashResult()
 }
 
+sealed class ChipDetection {
+    data class Found(val target: McuTarget) : ChipDetection()
+    data class Fail(val reason: String) : ChipDetection()
+}
+
 data class UsbDeviceInfo(
     val name: String,
     val vendorId: Int,
@@ -53,6 +58,8 @@ object UsbFlasher {
     private const val CMD_FLASH_DATA: Byte = 0x03
     private const val CMD_FLASH_END: Byte = 0x04
     private const val CMD_SYNC: Byte = 0x08
+    private const val CMD_READ_REG: Byte = 0x0A
+    private const val CMD_GET_SECURITY_INFO: Byte = 0x14
 
     // Espressif's VID for the ESP32-S3 (and S2/C3/C6/H2) built-in USB-JTAG-serial
     // interface. When the device is attached via this interface rather than an
@@ -73,6 +80,65 @@ object UsbFlasher {
             )
         }
     }
+
+    /** Query the ROM instead of guessing the chip from a shared USB adapter ID. */
+    suspend fun detectChip(context: Context, manualBoot: Boolean = false): ChipDetection =
+        withContext(Dispatchers.IO) {
+            val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager).firstOrNull()
+                ?: return@withContext ChipDetection.Fail("no USB serial device found")
+            if (!manager.hasPermission(driver.device) && !requestPermission(context, manager, driver)) {
+                return@withContext ChipDetection.Fail("USB permission denied")
+            }
+            val connection = manager.openDevice(driver.device)
+                ?: return@withContext ChipDetection.Fail("cannot open USB device")
+            val port = driver.ports.firstOrNull()
+                ?: return@withContext ChipDetection.Fail("USB device has no serial port")
+            try {
+                port.open(connection)
+                port.setParameters(BAUD, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+                try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
+                var synced = false
+                repeat(if (manualBoot) SYNC_ATTEMPTS else 3) {
+                    if (!synced) synced = trySync(port)
+                }
+                if (!synced && !manualBoot) {
+                    reset(port, if (driver.device.vendorId == VID_ESPRESSIF_USB_JTAG) "s3-usb-jtag" else "classic")
+                    delay(200)
+                    repeat(SYNC_ATTEMPTS) { if (!synced) synced = trySync(port) }
+                }
+                if (!synced) return@withContext ChipDetection.Fail("chip did not respond; enter download mode and retry")
+                // SYNC can yield extra echoes that must not be mistaken for
+                // the next command's response.
+                try { readSlipFrame(port, 100) } catch (_: Throwable) {}
+                try { readSlipFrame(port, 100) } catch (_: Throwable) {}
+                try {
+                    sendCommand(port, CMD_GET_SECURITY_INFO, byteArrayOf(), 0)
+                    val response = readResponse(port, CMD_GET_SECURITY_INFO, 1000)
+                    // Header is 8 bytes. Security info has flags (4), flash
+                    // crypt count (1), key purposes (7), then chip ID (4).
+                    if (response.size >= 24 && readU32LE(response, 20) == 9) {
+                        return@withContext ChipDetection.Found(McuTarget.ESP32_S3)
+                    }
+                } catch (_: Throwable) {
+                    // ESP8266 ROM does not implement GET_SECURITY_INFO.
+                }
+                try {
+                    val address = ByteArrayOutputStream().apply { writeU32LE(0x40001000) }.toByteArray()
+                    sendCommand(port, CMD_READ_REG, address, 0)
+                    val response = readResponse(port, CMD_READ_REG, 1000)
+                    if (readU32LE(response, 4) == 0xFFF0C101.toInt()) {
+                        return@withContext ChipDetection.Found(McuTarget.ESP8266_NODEMCU)
+                    }
+                } catch (_: Throwable) {}
+                ChipDetection.Fail("connected chip is not a supported ESP8266 or ESP32-S3")
+            } catch (t: Throwable) {
+                ChipDetection.Fail(t.message ?: t.javaClass.simpleName)
+            } finally {
+                try { port.close() } catch (_: Throwable) {}
+                try { connection.close() } catch (_: Throwable) {}
+            }
+        }
 
     /** Single-blob flash — reads the uri and dispatches through [flashPlan]. */
     suspend fun flash(
@@ -424,6 +490,14 @@ object UsbFlasher {
         var state = 0xEF
         for (b in data) state = state xor (b.toInt() and 0xFF)
         return state
+    }
+
+    private fun readU32LE(data: ByteArray, offset: Int): Int {
+        if (offset < 0 || data.size < offset + 4) return 0
+        return (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8) or
+            ((data[offset + 2].toInt() and 0xFF) shl 16) or
+            ((data[offset + 3].toInt() and 0xFF) shl 24)
     }
 
     private fun ByteArrayOutputStream.writeU16LE(v: Int) {
