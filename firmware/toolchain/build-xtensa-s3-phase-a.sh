@@ -27,6 +27,7 @@ GMP_VER="6.3.0"
 MPFR_VER="4.2.1"
 MPC_VER="1.3.1"
 ISL_VER="0.26"
+OVERLAY_REF="ef3bd5ed567e363e714d32402e73f2be99f03cfe"
 
 WORK="$HOME/xtensa-s3-phase-a"
 SRC="$WORK/src"
@@ -54,10 +55,21 @@ fetch_tar() {
 fetch_git https://github.com/espressif/binutils-gdb.git    "$BINUTILS_REF" binutils
 fetch_git https://github.com/espressif/gcc.git             "$GCC_REF"      gcc
 fetch_git https://github.com/espressif/newlib-esp32.git    "$NEWLIB_REF"   newlib
+if [[ ! -d "$SRC/xtensa-overlays" ]]; then
+  git clone https://github.com/espressif/xtensa-overlays.git "$SRC/xtensa-overlays"
+fi
+git -C "$SRC/xtensa-overlays" fetch --depth 1 origin "$OVERLAY_REF"
+git -C "$SRC/xtensa-overlays" checkout --detach FETCH_HEAD
 fetch_tar "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz"       "gmp-${GMP_VER}"
 fetch_tar "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"    "mpfr-${MPFR_VER}"
 fetch_tar "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz"       "mpc-${MPC_VER}"
 fetch_tar "https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz"     "isl-${ISL_VER}"
+
+# Espressif's GCC/binutils defaults to the generic Xtensa core, which is
+# big-endian. Apply the S3 configuration before building *any* target libs.
+for component in binutils gcc newlib; do
+  cp -a "$SRC/xtensa-overlays/xtensa_esp32s3/$component/." "$SRC/$component/"
+done
 
 ln -sfn "$SRC/gmp-${GMP_VER}"   "$SRC/gcc/gmp"
 ln -sfn "$SRC/mpfr-${MPFR_VER}" "$SRC/gcc/mpfr"
@@ -150,6 +162,23 @@ mkdir -p "$BLD/gcc2" && cd "$BLD/gcc2"
   --with-gnu-ld --with-gnu-as
 make -j"$JOBS"
 make install
+
+# A wrongly configured phase A can build successfully, yet produce target
+# libraries that the little-endian Arduino S3 core cannot link against.
+for archive in \
+  "$PHASE_A_PREFIX/lib/gcc/$TARGET/13.2.0/libgcc.a" \
+  "$PHASE_A_PREFIX/$TARGET/lib/libc.a"; do
+  test -s "$archive"
+  headers=$(readelf -h "$archive")
+  if [[ "$headers" == *'big endian'* ]]; then
+    echo "ERROR: $archive contains big-endian objects" >&2
+    exit 1
+  fi
+  [[ "$headers" == *'little endian'* ]] || {
+    echo "ERROR: could not verify little-endian objects in $archive" >&2
+    exit 1
+  }
+done
 
 du -sh "$PHASE_A_PREFIX"
 echo "===== phase A done ====="
