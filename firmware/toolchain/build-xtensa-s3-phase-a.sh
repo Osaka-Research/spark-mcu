@@ -37,6 +37,11 @@ sudo chown -R "$USER" "$PHASE_A_PREFIX" || true
 
 # Native host CC — runner's system gcc. Clear any env phase B may have set.
 unset CC CXX AR RANLIB STRIP LD CFLAGS CXXFLAGS LDFLAGS
+# ESP-IDF links target libraries throughout a large flash address space.
+# Build newlib and libstdc++ with Xtensa long-call sequences so archive
+# references remain valid when they resolve to distant firmware sections.
+export CFLAGS_FOR_TARGET="-mlongcalls"
+export CXXFLAGS_FOR_TARGET="-mlongcalls"
 
 fetch_git() {
   local url=$1 ref=$2 dir=$3
