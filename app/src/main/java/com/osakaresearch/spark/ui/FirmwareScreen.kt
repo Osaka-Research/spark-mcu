@@ -384,11 +384,9 @@ fun FirmwareScreen() {
             }
         }
 
-        // S3 blink validation: lets us exercise the flasher (reset sequence,
-        // image_v2 blobs, multi-offset plan) using arduino-cli output before
-        // the optional S3 compiler is packaged. Shown only when the user has
-        // picked ESP32-S3 + USB mode.
-        if (mode == FlashMode.USB && target == McuTarget.ESP32_S3) {
+        // Keep the precompiled recovery path for builds without the S3
+        // compiler. Normal app builds use the sketch compiler below.
+        if (mode == FlashMode.USB && target == McuTarget.ESP32_S3 && !target.isAvailable(context)) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
