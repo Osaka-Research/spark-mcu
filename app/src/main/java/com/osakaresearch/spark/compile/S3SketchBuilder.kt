@@ -105,9 +105,9 @@ object S3SketchBuilder {
             val link = buildList {
                 add(gpp.absolutePath)
                 add("-B"); add(binDir.absolutePath + "/")
-                // ESP-IDF supplies the entry point and linker sections; GCC's
-                // generic crt0/crti/crtbegin objects are not part of this core.
-                add("-nostartfiles")
+                // ESP-IDF supplies startup and runtime libraries explicitly;
+                // GCC's default crt objects and -lnosys are not in this core.
+                add("-nostdlib")
                 add("@${File(sdk, "flags/ld_flags").absolutePath}")
                 add("@${File(sdk, "flags/ld_scripts").absolutePath}")
                 add("-Wl,--Map=${File(work, "sketch.map").absolutePath}")
