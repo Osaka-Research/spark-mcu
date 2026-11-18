@@ -218,7 +218,8 @@ jobs:
           test -d "$PREFIX/$TARGET/lib"
           cd "$PREFIX"
           test -f "$PREFIX/arduino-core-esp32/prebuilt/core.a"
-          tar --hard-dereference -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32
+          cp "$NDK_ROOT/sources/cxx-stl/llvm-libc++/libs/arm64-v8a/libc++_shared.so" "$PREFIX/libc++_shared.so"
+          tar --hard-dereference -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32 libc++_shared.so
           tar -tJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" | sed -n '1,20p'
           ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"
 
