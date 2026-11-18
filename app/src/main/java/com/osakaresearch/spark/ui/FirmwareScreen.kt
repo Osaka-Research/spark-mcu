@@ -107,6 +107,22 @@ fun FirmwareScreen() {
     LaunchedEffect(mode, usbRefreshTick) {
         if (mode == FlashMode.USB) {
             usbDevices = UsbFlasher.listDevices(context)
+            if (usbDevices.size == 1 && !building && !uploading) {
+                detectingChip = true
+                try {
+                    when (val result = UsbFlasher.detectChip(context)) {
+                        is ChipDetection.Found -> {
+                            target = result.target
+                            compiledS3Selected = false
+                            offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                            log = log + "detected ${target.label} from chip ROM"
+                        }
+                        is ChipDetection.Fail -> log = log + "automatic chip detection: ${result.reason}"
+                    }
+                } finally {
+                    detectingChip = false
+                }
+            }
         }
     }
 
