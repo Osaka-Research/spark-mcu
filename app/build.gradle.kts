@@ -186,6 +186,13 @@ tasks.register("extractS3Toolchain") {
         }
         verifyLittleEndianArchive(File(stage, "lib/gcc/$target/13.2.0/libgcc.a"))
         verifyLittleEndianArchive(File(targetDir, "lib/libc.a"))
+        val cxxRuntime = File(stage, "libc++_shared.so")
+        val cxxDestination = File(toolchainJniLibsDir, "libc++_shared.so")
+        if (cxxRuntime.isFile) {
+            cxxRuntime.copyTo(cxxDestination, overwrite = true)
+        } else if (!cxxDestination.isFile) {
+            throw GradleException("S3 toolchain archive is missing libc++_shared.so")
+        }
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
             val dest = File(toolchainJniLibsDir, "lib${if (helper) "s3_" else ""}${bin.name}.so")
