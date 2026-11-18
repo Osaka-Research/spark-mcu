@@ -21,6 +21,7 @@ object S3SketchBuilder {
         try {
             Toolchain.ensurePrepared(ctx)
             val binDir = Toolchain.binDir(ctx, target)
+            val nativeLibraryDir = File(ctx.applicationInfo.nativeLibraryDir)
             val gcc = Toolchain.bin(ctx, "${target.toolchainTriple}-gcc", target)
             val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++", target)
             val core = Toolchain.coreDir(ctx, target)
@@ -78,7 +79,7 @@ object S3SketchBuilder {
                     add(src.absolutePath)
                     add("-o"); add(obj.absolutePath)
                 }
-                val (exit, output) = SketchBuilder.runProcess(cmd, work, binDir)
+                val (exit, output) = SketchBuilder.runProcess(cmd, work, binDir, nativeLibraryDir)
                 if (exit != 0 || !obj.isFile) {
                     log(output.trimEnd())
                     return@withContext SketchBuilder.Result.Fail(
@@ -109,7 +110,7 @@ object S3SketchBuilder {
                 add("-Wl,-EL")
                 add("-o"); add(elf.absolutePath)
             }
-            val (linkExit, linkOutput) = SketchBuilder.runProcess(link, work, binDir)
+            val (linkExit, linkOutput) = SketchBuilder.runProcess(link, work, binDir, nativeLibraryDir)
             if (linkExit != 0 || !elf.isFile) {
                 log(linkOutput.trimEnd())
                 return@withContext SketchBuilder.Result.Fail(
