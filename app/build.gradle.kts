@@ -200,8 +200,11 @@ tasks.register("extractS3Toolchain") {
             dest.setExecutable(true)
         }
         val helperSources = listOf(
-            File(stage, "$target/bin/as") to "as",
-            File(stage, "$target/bin/ld") to "ld",
+            // The target/bin helpers in the staged GCC archive are the
+            // x86_64-hosted originals. Use the Android-hosted cross tools
+            // from bin/ for the helpers that run on the phone.
+            File(binDir, "$target-as") to "as",
+            File(binDir, "$target-ld") to "ld",
             File(stage, "libexec/gcc/$target/13.2.0/cc1") to "cc1",
             File(stage, "libexec/gcc/$target/13.2.0/cc1plus") to "cc1plus",
             File(stage, "libexec/gcc/$target/13.2.0/collect2") to "collect2",
