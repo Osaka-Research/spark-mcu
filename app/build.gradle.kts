@@ -184,6 +184,8 @@ tasks.register("extractS3Toolchain") {
         if (!isPie) {
             throw GradleException("S3 toolchain gcc is not an Android-compatible PIE executable; rebuild the archive with -fPIE -pie")
         }
+        verifyLittleEndianArchive(File(stage, "lib/gcc/$target/13.2.0/libgcc.a"))
+        verifyLittleEndianArchive(File(targetDir, "lib/libc.a"))
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
             val dest = File(toolchainJniLibsDir, "lib${if (helper) "s3_" else ""}${bin.name}.so")
@@ -257,6 +259,38 @@ fun sha256(file: File): String {
         while (true) { val n = s.read(buf); if (n <= 0) break; md.update(buf, 0, n) }
     }
     return md.digest().joinToString("") { "%02x".format(it) }
+}
+
+fun verifyLittleEndianArchive(archive: File) {
+    if (!archive.isFile) throw GradleException("S3 toolchain missing ${archive.name}")
+    val bytes = archive.readBytes()
+    val magic = "!<arch>\n".toByteArray(Charsets.US_ASCII)
+    if (bytes.size < magic.size || !bytes.copyOfRange(0, magic.size).contentEquals(magic)) {
+        throw GradleException("${archive.name} is not an ar archive")
+    }
+    var pos = magic.size
+    var elfMembers = 0
+    while (pos + 60 <= bytes.size) {
+        val size = bytes.copyOfRange(pos + 48, pos + 58)
+            .toString(Charsets.US_ASCII).trim().toIntOrNull()
+            ?: throw GradleException("invalid member size in ${archive.name}")
+        val body = pos + 60
+        if (size < 0 || body + size > bytes.size) {
+            throw GradleException("truncated member in ${archive.name}")
+        }
+        if (size >= 6 && bytes[body] == 0x7f.toByte() &&
+            bytes[body + 1] == 'E'.code.toByte() &&
+            bytes[body + 2] == 'L'.code.toByte() &&
+            bytes[body + 3] == 'F'.code.toByte()
+        ) {
+            elfMembers++
+            if (bytes[body + 5] != 1.toByte()) {
+                throw GradleException("${archive.name} contains a non-little-endian object; rebuild the S3 toolchain")
+            }
+        }
+        pos = body + size + (size and 1)
+    }
+    if (elfMembers == 0) throw GradleException("${archive.name} has no ELF objects to verify")
 }
 
 android {
