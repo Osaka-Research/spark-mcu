@@ -1,6 +1,7 @@
 package com.osakaresearch.spark.mcp
 
 import android.util.Base64
+import com.osakaresearch.spark.net.ChipDetection
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -34,6 +35,19 @@ class McpTools(private val bridge: McpBridge) {
                 })
             }
             JSONObject().put("devices", arr).toString()
+        },
+
+        tool(
+            name = "detect_chip",
+            description = "Query the connected chip's ROM in download mode and identify a supported MCU. May reset the board to enter download mode; does not write flash.",
+            schema = """{"type":"object","properties":{"manual_boot":{"type":"boolean","default":false}},"additionalProperties":false}""",
+        ) { args ->
+            when (val result = bridge.detectChip(args.optBoolean("manual_boot", false))) {
+                is ChipDetection.Found -> JSONObject().put("ok", true)
+                    .put("target", result.target.id).put("label", result.target.label).toString()
+                is ChipDetection.Fail -> JSONObject().put("ok", false)
+                    .put("reason", result.reason).toString()
+            }
         },
 
         tool(
