@@ -439,12 +439,17 @@ object SketchBuilder {
         cmd: List<String>,
         workDir: File,
         binDir: File,
+        nativeLibraryDir: File? = null,
     ): Pair<Int, String> {
         val pb = ProcessBuilder(cmd)
             .directory(workDir)
             .redirectErrorStream(true)
         pb.environment()["PATH"] =
             "${binDir.absolutePath}:${pb.environment()["PATH"].orEmpty()}"
+        if (nativeLibraryDir != null) {
+            pb.environment()["LD_LIBRARY_PATH"] =
+                "${nativeLibraryDir.absolutePath}:${pb.environment()["LD_LIBRARY_PATH"].orEmpty()}"
+        }
         val proc = pb.start()
         val out = proc.inputStream.bufferedReader().readText()
         val exit = proc.waitFor()
