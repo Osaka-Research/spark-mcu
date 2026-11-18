@@ -7,6 +7,7 @@ import com.osakaresearch.spark.compile.SketchBuilder
 import com.osakaresearch.spark.compile.Toolchain
 import com.osakaresearch.spark.net.FlashBlob
 import com.osakaresearch.spark.net.FlashResult
+import com.osakaresearch.spark.net.ChipDetection
 import com.osakaresearch.spark.net.PrecompiledBlobs
 import com.osakaresearch.spark.net.UsbFlasher
 import com.osakaresearch.spark.net.UsbSerialMonitor
@@ -56,6 +57,9 @@ class McpBridge(private val appCtx: Context) {
         UsbFlasher.listDevices(appCtx).map {
             DeviceEntry(it.name, it.vendorId, it.productId, it.hasPermission)
         }
+
+    suspend fun detectChip(manualBoot: Boolean): ChipDetection =
+        UsbFlasher.detectChip(appCtx, manualBoot)
 
     /**
      * Writes [inoSource] into a transient sketch dir, builds it with the

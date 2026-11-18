@@ -85,7 +85,9 @@ object UsbSerialMonitor {
         return try {
             port.open(connection)
             port.setParameters(baud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            port.purgeHwBuffers(true, true)
+            // Native ESP32-S3 USB serial/JTAG uses CDC-ACM, which does not
+            // expose a host-side hardware FIFO to purge.
+            try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
             currentPort = port
             readerJob = scope.launch { readLoop(port) }
             _state.value = State.Running(
