@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import com.osakaresearch.spark.compile.McuTarget
 import com.osakaresearch.spark.compile.SketchBuilder
 import com.osakaresearch.spark.compile.Toolchain
+import com.osakaresearch.spark.net.ChipDetection
 import com.osakaresearch.spark.net.FlashResult
 import com.osakaresearch.spark.net.Ota
 import com.osakaresearch.spark.net.OtaResult
@@ -88,6 +89,7 @@ fun FirmwareScreen() {
     var usbRefreshTick by remember { mutableIntStateOf(0) }
     var manualBoot by remember { mutableStateOf(false) }
     var building by remember { mutableStateOf(false) }
+    var detectingChip by remember { mutableStateOf(false) }
     var sketchUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var sketchName by remember { mutableStateOf("") }
     var target by remember { mutableStateOf(McuTarget.Default) }
@@ -207,6 +209,29 @@ fun FirmwareScreen() {
                     shape = SegmentedButtonDefaults.itemShape(i, McuTarget.values().size),
                 ) { Text(t.label) }
             }
+        }
+        if (mode == FlashMode.USB) {
+            OutlinedButton(
+                enabled = !building && !uploading && !detectingChip && usbDevices.isNotEmpty(),
+                onClick = {
+                    detectingChip = true
+                    scope.launch {
+                        try {
+                            when (val result = UsbFlasher.detectChip(context, manualBoot)) {
+                                is ChipDetection.Found -> {
+                                    target = result.target
+                                    compiledS3Selected = false
+                                    offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                                    log = log + "detected ${target.label} from chip ROM"
+                                }
+                                is ChipDetection.Fail -> log = log + "chip detection: ${result.reason}"
+                            }
+                        } finally {
+                            detectingChip = false
+                        }
+                    }
+                },
+            ) { Text(if (detectingChip) "Detecting chip…" else "Detect USB chip") }
         }
         Text(
             if (target.isAvailable(context)) target.detail
