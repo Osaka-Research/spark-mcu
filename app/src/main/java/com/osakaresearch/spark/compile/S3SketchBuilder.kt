@@ -25,6 +25,9 @@ object S3SketchBuilder {
             val gcc = Toolchain.bin(ctx, "${target.toolchainTriple}-gcc", target)
             val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++", target)
             val core = Toolchain.coreDir(ctx, target)
+            val sysroot = Toolchain.sysroot(ctx, target)
+            val gccVersion = "13.2.0"
+            val gccLib = File(sysroot, "lib/gcc/${target.toolchainTriple}/$gccVersion")
             val sdk = File(core, "sdk")
             val coreA = File(core, "prebuilt/core.a")
             listOf(gcc, gpp, coreA, File(sdk, "flags/ld_libs")).forEach {
@@ -49,6 +52,14 @@ object S3SketchBuilder {
                 "-DARDUINO_USB_DFU_ON_BOOT=0",
             )
             val includes = buildList {
+                // GCC's relocated Android executable cannot infer its original
+                // prefix from the JNI symlink. Supply its standard headers.
+                val cxx = File(sysroot, "include/c++/$gccVersion")
+                add("-isystem"); add(cxx.absolutePath)
+                add("-isystem"); add(File(cxx, target.toolchainTriple).absolutePath)
+                add("-isystem"); add(File(cxx, "backward").absolutePath)
+                add("-isystem"); add(File(gccLib, "include").absolutePath)
+                add("-isystem"); add(File(sysroot, "include").absolutePath)
                 add("-I${core.absolutePath}/cores/esp32")
                 add("-I${core.absolutePath}/variants/esp32s3")
                 sketch.extraIncludeDirs.forEach { add("-I${it.absolutePath}") }
@@ -98,6 +109,8 @@ object S3SketchBuilder {
                 add("@${File(sdk, "flags/ld_scripts").absolutePath}")
                 add("-Wl,--Map=${File(work, "sketch.map").absolutePath}")
                 add("-L${File(sdk, "lib").absolutePath}")
+                add("-L${gccLib.absolutePath}")
+                add("-L${File(sysroot, "lib").absolutePath}")
                 add("-L${File(sdk, "ld").absolutePath}")
                 val memory = File(sdk, "qio_qspi")
                 if (memory.isDirectory) add("-L${memory.absolutePath}")
