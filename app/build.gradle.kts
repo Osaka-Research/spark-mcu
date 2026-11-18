@@ -219,6 +219,7 @@ tasks.register("extractS3Toolchain") {
         coreAssets.deleteRecursively()
         coreDir.copyRecursively(coreAssets, overwrite = true)
         stamp.writeText("sha256=${sha256(tarball)}\n")
+        stage.deleteRecursively()
     }
 }
 
