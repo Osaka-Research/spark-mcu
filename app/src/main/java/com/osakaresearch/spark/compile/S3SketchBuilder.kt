@@ -26,7 +26,7 @@ object S3SketchBuilder {
             val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++", target)
             val core = Toolchain.coreDir(ctx, target)
             val sysroot = Toolchain.sysroot(ctx, target)
-            val gccVersion = "13.2.0"
+            val gccVersion = target.gccVer
             val gccLib = File(sysroot, "lib/gcc/${target.toolchainTriple}/$gccVersion")
             val sdk = File(core, "sdk")
             val coreA = File(core, "prebuilt/core.a")
@@ -59,6 +59,7 @@ object S3SketchBuilder {
                 add("-isystem"); add(File(cxx, target.toolchainTriple).absolutePath)
                 add("-isystem"); add(File(cxx, "backward").absolutePath)
                 add("-isystem"); add(File(gccLib, "include").absolutePath)
+                add("-isystem"); add(File(gccLib, "include-fixed").absolutePath)
                 add("-isystem"); add(File(sysroot, "include").absolutePath)
                 add("-I${core.absolutePath}/cores/esp32")
                 add("-I${core.absolutePath}/variants/esp32s3")
