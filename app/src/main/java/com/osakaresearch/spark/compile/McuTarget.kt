@@ -46,7 +46,7 @@ enum class McuTarget(
         detail = "xtensa-esp32s3 · app image at 0x10000",
         available = false,
         toolchainTriple = "xtensa-esp32s3-elf",
-        gccVer = "13.2.0",
+        gccVer = "12.2.0",
         coreAssetSubdir = "toolchain/arduino-core-esp32",
         ldExactMatchSources = emptySet(),
     ),

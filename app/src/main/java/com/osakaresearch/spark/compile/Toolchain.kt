@@ -27,7 +27,7 @@ object Toolchain {
 
     // Monotonic version. Bump if the asset/jniLibs shape changes so the
     // on-device scratch area gets rebuilt on next launch.
-    private const val VERSION = 6
+    private const val VERSION = 7
 
     fun versionTag(): String = "v$VERSION"
 

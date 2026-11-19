@@ -145,7 +145,7 @@ tasks.register("extractS3Toolchain") {
         // archive has a few alias entries, so extract their targets and copy
         // the aliases as ordinary files after tar finishes.
         val hardLinkAliases = mapOf(
-            "bin/xtensa-esp32s3-elf-gcc-13.2.0" to "bin/xtensa-esp32s3-elf-gcc",
+            "bin/xtensa-esp32s3-elf-gcc-12.2.0" to "bin/xtensa-esp32s3-elf-gcc",
             "bin/xtensa-esp32s3-elf-ld" to "bin/xtensa-esp32s3-elf-ld.bfd",
             "bin/xtensa-esp32s3-elf-c++" to "bin/xtensa-esp32s3-elf-g++",
             "xtensa-esp32s3-elf/lib/libg.a" to "xtensa-esp32s3-elf/lib/libc.a",
@@ -173,27 +173,22 @@ tasks.register("extractS3Toolchain") {
         if (!binDir.isDirectory || !targetDir.isDirectory || !coreDir.isDirectory) {
             throw GradleException("S3 tarball needs bin/, $target/, and arduino-core-esp32/ at root")
         }
-        val gcc = File(binDir, "$target-gcc")
-        val elfHeader = gcc.inputStream().use { it.readNBytes(20) }
-        val isPie = elfHeader.size >= 20 &&
-            elfHeader[0] == 0x7f.toByte() &&
-            elfHeader[1] == 'E'.code.toByte() &&
-            elfHeader[2] == 'L'.code.toByte() &&
-            elfHeader[3] == 'F'.code.toByte() &&
-            elfHeader[16] == 3.toByte() && elfHeader[17] == 0.toByte()
-        if (!isPie) {
-            throw GradleException("S3 toolchain gcc is not an Android-compatible PIE executable; rebuild the archive with -fPIE -pie")
-        }
-        verifyLittleEndianArchive(File(stage, "lib/gcc/$target/13.2.0/libgcc.a"))
+        verifyS3AndroidExecutable(File(binDir, "$target-gcc"))
+        verifyLittleEndianArchive(File(stage, "lib/gcc/$target/12.2.0/libgcc.a"))
         verifyLittleEndianArchive(File(targetDir, "lib/libc.a"))
+        verifyLittleEndianArchive(File(targetDir, "lib/libstdc++.a"))
         val cxxRuntime = File(stage, "libc++_shared.so")
         val cxxDestination = File(toolchainJniLibsDir, "libc++_shared.so")
-        if (cxxRuntime.isFile) {
-            cxxRuntime.copyTo(cxxDestination, overwrite = true)
-        } else if (!cxxDestination.isFile) {
+        if (!cxxRuntime.isFile) {
             throw GradleException("S3 toolchain archive is missing libc++_shared.so")
         }
+        // Remove helpers and versioned aliases from the previous S3 archive.
+        toolchainJniLibsDir.listFiles()?.filter {
+            it.name.startsWith("lib$target-") || it.name.startsWith("libs3_")
+        }?.forEach { it.delete() }
+        cxxRuntime.copyTo(cxxDestination, overwrite = true)
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
+            verifyS3AndroidExecutable(bin)
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
             val dest = File(toolchainJniLibsDir, "lib${if (helper) "s3_" else ""}${bin.name}.so")
             bin.copyTo(dest, overwrite = true)
@@ -205,18 +200,20 @@ tasks.register("extractS3Toolchain") {
             // from bin/ for the helpers that run on the phone.
             File(binDir, "$target-as") to "as",
             File(binDir, "$target-ld") to "ld",
-            File(stage, "libexec/gcc/$target/13.2.0/cc1") to "cc1",
-            File(stage, "libexec/gcc/$target/13.2.0/cc1plus") to "cc1plus",
-            File(stage, "libexec/gcc/$target/13.2.0/collect2") to "collect2",
-            File(stage, "libexec/gcc/$target/13.2.0/lto1") to "lto1",
-            File(stage, "libexec/gcc/$target/13.2.0/lto-wrapper") to "lto-wrapper",
+            File(stage, "libexec/gcc/$target/12.2.0/cc1") to "cc1",
+            File(stage, "libexec/gcc/$target/12.2.0/cc1plus") to "cc1plus",
+            File(stage, "libexec/gcc/$target/12.2.0/collect2") to "collect2",
+            File(stage, "libexec/gcc/$target/12.2.0/lto1") to "lto1",
+            File(stage, "libexec/gcc/$target/12.2.0/lto-wrapper") to "lto-wrapper",
         )
         helperSources.forEach { (src, name) ->
             if (!src.isFile) {
                 if (name in setOf("lto1", "lto-wrapper")) return@forEach
                 throw GradleException("S3 toolchain missing helper: ${src.absolutePath}")
             }
+            verifyS3AndroidExecutable(src)
             src.copyTo(File(toolchainJniLibsDir, "libs3_$name.so"), overwrite = true)
+                .setExecutable(true)
         }
         val assets = File(toolchainAssetsDir, target)
         assets.deleteRecursively()
@@ -236,6 +233,19 @@ tasks.register("extractS3Toolchain") {
 afterEvaluate {
     tasks.named("preBuild") {
         dependsOn("extractS3Toolchain")
+    }
+}
+
+fun verifyS3AndroidExecutable(binary: File) {
+    val header = binary.inputStream().use { it.readNBytes(20) }
+    val arm64Pie = header.size == 20 &&
+        header[0] == 0x7f.toByte() && header[1] == 'E'.code.toByte() &&
+        header[2] == 'L'.code.toByte() && header[3] == 'F'.code.toByte() &&
+        header[4] == 2.toByte() && header[5] == 1.toByte() &&
+        header[16] == 3.toByte() && header[17] == 0.toByte() &&
+        header[18] == 183.toByte() && header[19] == 0.toByte()
+    if (!arm64Pie) {
+        throw GradleException("S3 tool ${binary.name} must be an AArch64 PIE executable for Android")
     }
 }
 
