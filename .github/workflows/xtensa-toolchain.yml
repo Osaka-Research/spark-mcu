@@ -8,8 +8,8 @@ name: xtensa toolchain (Android host)
 # Produces one tarball per target. Both are consumed by phase 2
 # (prebuild Arduino core.a) and phase 3 (APK packaging). The two targets
 # run as sibling jobs because their phase-A paths diverge: lx106 uses
-# ct-ng's canned sample, S3 uses a direct binutils+gcc+newlib build
-# pinned to Espressif's gcc 13.2 era (see firmware/toolchain/README.md).
+# ct-ng's canned sample, S3 uses Espressif's pinned GCC 12.2 release and
+# target runtime matching Arduino-ESP32 3.0.5 (see firmware/toolchain/README.md).
 
 on:
   workflow_dispatch:
@@ -176,12 +176,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/x-tools/xtensa-esp32s3-elf
-          key: s3-phase-a-esp-13.2.0-20240530-overlay-v3-longcalls
+          key: s3-phase-a-official-esp-12.2.0-20230208-v1
 
       - name: Phase A — native cross (x86_64 → xtensa-esp32s3-elf)
         if: steps.cache-s3-a.outputs.cache-hit != 'true'
-        # No ct-ng sample for S3's gcc-13.2 era; we drive binutils/gcc/newlib
-        # directly so phase B can copy target libs out of PHASE_A_PREFIX.
+        # Keep ESP-IDF's exact runtime configuration and ABI by using the
+        # official native release; phase B rebuilds the Android executables.
         run: |
           set -euo pipefail
           export PHASE_A_PREFIX="$HOME/x-tools/xtensa-esp32s3-elf"
