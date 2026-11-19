@@ -1,190 +1,31 @@
 #!/usr/bin/env bash
-# Phase A of the Canadian cross for ESP32-S3: builds a native x86_64 Linux
-# -> xtensa-esp32s3-elf cross. Its output feeds PHASE_A_PREFIX consumed by
-# build-xtensa-s3-android.sh (phase B), which produces the aarch64-Android
-# toolchain we actually ship.
-#
-# Why this is a standalone script rather than `ct-ng xtensa-esp32s3-elf`
-# (what the lx106 phase A does in the workflow): Espressif moved the S3 /
-# gcc-13.2 toolchain off crosstool-NG. The pins below are the same tags
-# phase B uses, so both phases stay version-locked.
-#
-# Env:
-#   PHASE_A_PREFIX — install prefix (consumed by phase B as PHASE_A_PREFIX)
-
+# Native bootstrap and target runtime for Arduino-ESP32 3.0.5 (esp-xs3@2302).
+# Target libraries are host independent. Use Espressif's exact release so
+# newlib's reentrancy layout, locking, long calls and exception unwinding
+# match the precompiled ESP-IDF SDK and Arduino core shipped in the app.
 set -euo pipefail
 
 : "${PHASE_A_PREFIX:?PHASE_A_PREFIX must be set}"
 
 TARGET="xtensa-esp32s3-elf"
-
-# Must match build-xtensa-s3-android.sh — phase B copies target libs from
-# PHASE_A_PREFIX, so a version skew would silently ship mismatched libgcc.
-BINUTILS_REF="esp-2.41.0_20240530"
-GCC_REF="esp-13.2.0_20240530"
-NEWLIB_REF="esp-4.3.0_20240530"
-GMP_VER="6.3.0"
-MPFR_VER="4.2.1"
-MPC_VER="1.3.1"
-ISL_VER="0.26"
-OVERLAY_REF="ef3bd5ed567e363e714d32402e73f2be99f03cfe"
-
+RELEASE="esp-12.2.0_20230208"
+ARCHIVE="xtensa-esp32s3-elf-12.2.0_20230208-x86_64-linux-gnu.tar.gz"
+SHA256="61495ffe575e00c6998ae7274ff917658c04bded62ece0937c7042d6dcbf46de"
 WORK="$HOME/xtensa-s3-phase-a"
-SRC="$WORK/src"
-BLD="$WORK/build"
-mkdir -p "$SRC" "$BLD" "$PHASE_A_PREFIX"
-sudo chown -R "$USER" "$PHASE_A_PREFIX" || true
+mkdir -p "$WORK" "$PHASE_A_PREFIX"
+curl --fail --location --retry 3 \
+  "https://github.com/espressif/crosstool-NG/releases/download/$RELEASE/$ARCHIVE" \
+  --output "$WORK/$ARCHIVE"
+printf '%s  %s\n' "$SHA256" "$WORK/$ARCHIVE" | sha256sum --check --status
+tar -xzf "$WORK/$ARCHIVE" --strip-components=1 -C "$PHASE_A_PREFIX"
+test "$("$PHASE_A_PREFIX/bin/$TARGET-gcc" -dumpfullversion)" = "12.2.0"
 
-# Native host CC — runner's system gcc. Clear any env phase B may have set.
-unset CC CXX AR RANLIB STRIP LD CFLAGS CXXFLAGS LDFLAGS
-# ESP-IDF links target libraries throughout a large flash address space.
-# Build newlib and libstdc++ with Xtensa long-call sequences so archive
-# references remain valid when they resolve to distant firmware sections.
-export CFLAGS_FOR_TARGET="-mlongcalls"
-export CXXFLAGS_FOR_TARGET="-mlongcalls"
-
-fetch_git() {
-  local url=$1 ref=$2 dir=$3
-  if [[ ! -d "$SRC/$dir" ]]; then
-    git clone --depth 1 --branch "$ref" "$url" "$SRC/$dir"
-  fi
-}
-fetch_tar() {
-  local url=$1 dir=$2
-  if [[ ! -d "$SRC/$dir" ]]; then
-    wget -q "$url" -O "$SRC/$(basename "$url")"
-    tar -xf "$SRC/$(basename "$url")" -C "$SRC"
-  fi
-}
-
-fetch_git https://github.com/espressif/binutils-gdb.git    "$BINUTILS_REF" binutils
-fetch_git https://github.com/espressif/gcc.git             "$GCC_REF"      gcc
-fetch_git https://github.com/espressif/newlib-esp32.git    "$NEWLIB_REF"   newlib
-if [[ ! -d "$SRC/xtensa-overlays" ]]; then
-  git clone https://github.com/espressif/xtensa-overlays.git "$SRC/xtensa-overlays"
-fi
-git -C "$SRC/xtensa-overlays" fetch --depth 1 origin "$OVERLAY_REF"
-git -C "$SRC/xtensa-overlays" checkout --detach FETCH_HEAD
-fetch_tar "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz"       "gmp-${GMP_VER}"
-fetch_tar "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"    "mpfr-${MPFR_VER}"
-fetch_tar "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz"       "mpc-${MPC_VER}"
-fetch_tar "https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz"     "isl-${ISL_VER}"
-
-# Espressif's GCC/binutils defaults to the generic Xtensa core, which is
-# big-endian. Apply the S3 configuration before building *any* target libs.
-for component in binutils gcc newlib; do
-  cp -a "$SRC/xtensa-overlays/xtensa_esp32s3/$component/." "$SRC/$component/"
-done
-
-ln -sfn "$SRC/gmp-${GMP_VER}"   "$SRC/gcc/gmp"
-ln -sfn "$SRC/mpfr-${MPFR_VER}" "$SRC/gcc/mpfr"
-ln -sfn "$SRC/mpc-${MPC_VER}"   "$SRC/gcc/mpc"
-ln -sfn "$SRC/isl-${ISL_VER}"   "$SRC/gcc/isl"
-
-JOBS=$(nproc)
-
-# --- 1. binutils -------------------------------------------------------------
-echo "===== binutils (phase A, $TARGET) ====="
-mkdir -p "$BLD/binutils" && cd "$BLD/binutils"
-"$SRC/binutils/configure" \
-  --target="$TARGET" \
-  --prefix="$PHASE_A_PREFIX" \
-  --with-sysroot="$PHASE_A_PREFIX/$TARGET" \
-  --disable-nls \
-  --disable-werror \
-  --disable-shared \
-  --enable-static \
-  --disable-gdb \
-  --disable-sim \
-  --disable-readline \
-  --disable-libdecnumber
-make -j"$JOBS"
-make install
-
-export PATH="$PHASE_A_PREFIX/bin:$PATH"
-
-# --- 2. gcc stage 1 (C only, no libc headers) --------------------------------
-# Bootstrap gcc without newlib so we can build newlib with it in step 3.
-echo "===== gcc stage 1 (phase A, $TARGET) ====="
-mkdir -p "$BLD/gcc1" && cd "$BLD/gcc1"
-"$SRC/gcc/configure" \
-  --target="$TARGET" \
-  --prefix="$PHASE_A_PREFIX" \
-  --with-sysroot="$PHASE_A_PREFIX/$TARGET" \
-  --without-headers \
-  --with-newlib \
-  --enable-languages=c \
-  --disable-shared \
-  --enable-static \
-  --disable-nls \
-  --disable-werror \
-  --disable-libssp \
-  --disable-multilib \
-  --disable-threads \
-  --disable-libgomp \
-  --disable-libatomic \
-  --disable-libquadmath \
-  --disable-decimal-float \
-  --with-gnu-ld --with-gnu-as
-make -j"$JOBS" all-gcc
-make install-gcc
-make -j"$JOBS" all-target-libgcc
-make install-target-libgcc
-
-# --- 3. newlib ---------------------------------------------------------------
-echo "===== newlib (phase A, $TARGET) ====="
-mkdir -p "$BLD/newlib" && cd "$BLD/newlib"
-"$SRC/newlib/configure" \
-  --target="$TARGET" \
-  --prefix="$PHASE_A_PREFIX" \
-  --disable-newlib-supplied-syscalls \
-  --disable-nls
-make -j"$JOBS" all-target-newlib
-make install-target-newlib
-
-# --- 4. gcc stage 2 (C + C++ against installed newlib) -----------------------
-echo "===== gcc stage 2 (phase A, $TARGET) ====="
-mkdir -p "$BLD/gcc2" && cd "$BLD/gcc2"
-"$SRC/gcc/configure" \
-  --target="$TARGET" \
-  --prefix="$PHASE_A_PREFIX" \
-  --with-sysroot="$PHASE_A_PREFIX/$TARGET" \
-  --with-newlib \
-  --with-headers="$PHASE_A_PREFIX/$TARGET/include" \
-  --enable-languages=c,c++ \
-  --disable-shared \
-  --enable-static \
-  --disable-nls \
-  --disable-werror \
-  --disable-libssp \
-  --disable-libstdcxx-pch \
-  --disable-multilib \
-  --disable-threads \
-  --disable-libgomp \
-  --disable-libatomic \
-  --disable-libquadmath \
-  --disable-decimal-float \
-  --with-gnu-ld --with-gnu-as
-make -j"$JOBS"
-make install
-
-# A wrongly configured phase A can build successfully, yet produce target
-# libraries that the little-endian Arduino S3 core cannot link against.
-for archive in \
-  "$PHASE_A_PREFIX/lib/gcc/$TARGET/13.2.0/libgcc.a" \
-  "$PHASE_A_PREFIX/$TARGET/lib/libc.a"; do
-  test -s "$archive"
-  headers=$(readelf -h "$archive")
-  if [[ "$headers" == *'big endian'* ]]; then
-    echo "ERROR: $archive contains big-endian objects" >&2
-    exit 1
-  fi
-  [[ "$headers" == *'little endian'* ]] || {
-    echo "ERROR: could not verify little-endian objects in $archive" >&2
-    exit 1
-  }
-done
-
-du -sh "$PHASE_A_PREFIX"
-echo "===== phase A done ====="
-ls "$PHASE_A_PREFIX/bin"
+# These ESP-IDF entry points are absent from differently configured newlib
+# or libgcc builds even when those builds use a compatible instruction set.
+"$PHASE_A_PREFIX/bin/$TARGET-nm" --defined-only \
+  "$PHASE_A_PREFIX/$TARGET/lib/libc.a" > "$WORK/libc-symbols.txt"
+"$PHASE_A_PREFIX/bin/$TARGET-nm" --defined-only \
+  "$PHASE_A_PREFIX/lib/gcc/$TARGET/12.2.0/libgcc.a" > "$WORK/libgcc-symbols.txt"
+grep -q ' _cleanup_r$' "$WORK/libc-symbols.txt"
+grep -q ' _Unwind_SetEnableExceptionFdeSorting$' "$WORK/libgcc-symbols.txt"
+echo "Verified Espressif $RELEASE compiler and target runtime"

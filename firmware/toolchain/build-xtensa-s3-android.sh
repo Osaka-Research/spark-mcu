@@ -5,7 +5,7 @@
 #
 # Sibling of build-xtensa-android.sh (ESP8266/lx106). Kept separate rather
 # than parametrized because the pinned Espressif refs are different and the
-# gcc/newlib combo for S3 is on a much newer branch (gcc 13.2 vs lx106's
+# gcc/newlib combo for S3 is on a much newer branch (gcc 12.2 vs lx106's
 # gcc 10.3). A single script branching on TARGET would obscure which versions
 # ship with which artifact.
 #
@@ -35,17 +35,15 @@ if [[ "$TARGET" != "xtensa-esp32s3-elf" ]]; then
   exit 2
 fi
 
-# --- Pinned versions (arduino-esp32 3.x era, gcc 13.2) -----------------------
-# These tags track the toolchain that ships with ESP-IDF v5.1.x, which
-# arduino-esp32 3.x is built against. Bump when we move to IDF v5.2+.
-BINUTILS_REF="esp-2.41.0_20240530"
-GCC_REF="esp-13.2.0_20240530"
-NEWLIB_REF="esp-4.3.0_20240530"
+# Arduino-ESP32 3.0.5 uses esp-xs3@2302, including GCC 12.2 and newlib 4.1.
+# Match its compiler and reuse its target libraries from phase A.
+BINUTILS_REF="esp-2.39.0_20230208"
+GCC_REF="esp-12.2.0_20230208"
 GMP_VER="6.3.0"
 MPFR_VER="4.2.1"
 MPC_VER="1.3.1"
 ISL_VER="0.26"
-OVERLAY_REF="ef3bd5ed567e363e714d32402e73f2be99f03cfe"
+OVERLAY_REF="dd1cf19f6eb327a9db51043439974a6de13f5c7f"
 
 WORK="$HOME/xtensa-s3-canadian"
 SRC="$WORK/src"
@@ -89,7 +87,6 @@ fetch_tar() {
 
 fetch_git https://github.com/espressif/binutils-gdb.git     "$BINUTILS_REF" binutils
 fetch_git https://github.com/espressif/gcc.git              "$GCC_REF"      gcc
-fetch_git https://github.com/espressif/newlib-esp32.git     "$NEWLIB_REF"   newlib
 if [[ ! -d "$SRC/xtensa-overlays" ]]; then
   git clone https://github.com/espressif/xtensa-overlays.git "$SRC/xtensa-overlays"
 fi
@@ -102,7 +99,7 @@ fetch_tar "https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz"     "isl-${ISL_V
 
 # Keep Android-hosted binutils/GCC on the same S3 Xtensa configuration as
 # phase A's little-endian target libraries.
-for component in binutils gcc newlib; do
+for component in binutils gcc; do
   cp -a "$SRC/xtensa-overlays/xtensa_esp32s3/$component/." "$SRC/$component/"
 done
 
@@ -141,7 +138,7 @@ cp -a "$PHASE_A_PREFIX/$TARGET/." "$PREFIX/$TARGET/"
 mkdir -p "$PREFIX/lib/gcc/$TARGET"
 cp -a "$PHASE_A_PREFIX/lib/gcc/$TARGET/." "$PREFIX/lib/gcc/$TARGET/"
 for archive in \
-  "$PREFIX/lib/gcc/$TARGET/13.2.0/libgcc.a" \
+  "$PREFIX/lib/gcc/$TARGET/12.2.0/libgcc.a" \
   "$PREFIX/$TARGET/lib/libc.a"; do
   test -s "$archive"
   headers=$(readelf -h "$archive")
@@ -173,7 +170,7 @@ mkdir -p "$BLD/gcc" && cd "$BLD/gcc"
   --disable-libssp \
   --disable-libstdcxx-pch \
   --disable-multilib \
-  --disable-threads \
+  --enable-threads=posix \
   --disable-libmudflap \
   --disable-libgomp \
   --disable-libatomic \
