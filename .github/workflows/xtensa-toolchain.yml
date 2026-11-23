@@ -8,12 +8,17 @@ name: xtensa toolchain (Android host)
 # Produces one tarball per target. Both are consumed by phase 2
 # (prebuild Arduino core.a) and phase 3 (APK packaging). The two targets
 # run as sibling jobs because their phase-A paths diverge: lx106 uses
-# ct-ng's canned sample, S3 uses a direct binutils+gcc+newlib build
-# pinned to Espressif's gcc 13.2 era (see firmware/toolchain/README.md).
+# ct-ng's canned sample, S3 uses Espressif's pinned GCC 12.2 release and
+# target runtime matching Arduino-ESP32 3.0.5 (see firmware/toolchain/README.md).
 
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: "Toolchain to build"
+        type: choice
+        options: [s3, lx106, all]
+        default: s3
       upload_release:
         description: "Attach tarball to a GitHub release"
         type: boolean
@@ -38,6 +43,7 @@ env:
 
 jobs:
   build-lx106:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'lx106'
     runs-on: ubuntu-22.04
     env:
       TARGET: "xtensa-lx106-elf"
@@ -72,9 +78,7 @@ jobs:
           key: ctng-espressif-esp8266-1.22.x-rel-${{ runner.os }}-v2
 
       - name: Build crosstool-NG (Espressif fork)
-        # Pinned to esp8266-1.22.x-rel: the main branch dropped the
-        # xtensa-lx106-elf sample, so `ct-ng xtensa-lx106-elf` fails with
-        # "No rule to make target". This branch still ships it.
+        # This branch still includes the xtensa-lx106-elf sample.
         if: steps.cache-ctng.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
@@ -142,6 +146,7 @@ jobs:
           fail_on_unmatched_files: true
 
   build-s3:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 's3'
     runs-on: ubuntu-22.04
     env:
       TARGET: "xtensa-esp32s3-elf"
@@ -173,12 +178,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/x-tools/xtensa-esp32s3-elf
-          key: s3-phase-a-esp-13.2.0-20240530-v1
+          key: s3-phase-a-official-esp-12.2.0-20230208-v1
 
       - name: Phase A — native cross (x86_64 → xtensa-esp32s3-elf)
         if: steps.cache-s3-a.outputs.cache-hit != 'true'
-        # No ct-ng sample for S3's gcc-13.2 era; we drive binutils/gcc/newlib
-        # directly so phase B can copy target libs out of PHASE_A_PREFIX.
+        # Keep ESP-IDF's exact runtime configuration and ABI by using the
+        # official native release; phase B rebuilds the Android executables.
         run: |
           set -euo pipefail
           export PHASE_A_PREFIX="$HOME/x-tools/xtensa-esp32s3-elf"
@@ -213,9 +218,9 @@ jobs:
           test -x "$PREFIX/bin/$TARGET-g++"
           test -d "$PREFIX/$TARGET/include"
           test -d "$PREFIX/$TARGET/lib"
-          cp "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$PREFIX/libc++_shared.so"
           cd "$PREFIX"
           test -f "$PREFIX/arduino-core-esp32/prebuilt/core.a"
+          cp "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$PREFIX/libc++_shared.so"
           tar --hard-dereference -cJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" bin "$TARGET" lib libexec arduino-core-esp32 libc++_shared.so
           tar -tJf "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz" | sed -n '1,20p'
           ls -lh "$RUNNER_TEMP/xtensa-esp32s3-elf-android-arm64.tar.xz"

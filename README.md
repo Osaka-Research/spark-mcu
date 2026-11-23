@@ -8,7 +8,7 @@ Spark MCU turns an Android phone into a portable workspace for ESP8266, ESP32, a
 - **A sensor dashboard:** read GPIO values and stream events or logs to the Monitor tab.
 - **A portable firmware workstation:** compile an Arduino sketch on a supported Android phone, then flash the resulting binary over USB-OTG.
 - **An ESP32-S3 setup or recovery tool:** flash the bootloader, partition table, boot app image, and firmware together from a precompiled build.
-- **A sketch development assistant:** ask the optional AI tab for code help, review the answer, and decide when to compile or flash it.
+- **An on-phone engineering agent:** describe a hardware task in the AI tab and let Spark identify the chip, edit code, compile, flash with authorization, and diagnose serial output.
 
 For live control and telemetry, install the Spark MCU firmware on the board. The USB flasher can also install compatible precompiled ESP firmware without the Spark MCU firmware already running.
 
@@ -56,7 +56,15 @@ For a precompiled ESP32-S3 build, select a folder containing `bootloader.bin`, `
 
 ### AI assistance and local automation
 
-The optional **AI** tab can use OpenAI, Anthropic, MiniMax, or a custom OpenAI-compatible endpoint to help draft sketches. API keys are stored in encrypted app preferences. Review generated code before using it; AI responses are not flashed automatically.
+Connect ChatGPT in the **AI** tab and select an available model to use the board tools. Describe the intended behavior, or use **Build, run & debug** for the current project. Spark keeps a visible plan, working sketch, compiler diagnostics and recent observations across turns and app restarts. Other providers currently offer chat guidance only.
+
+The agent can identify a USB-connected ESP8266 or ESP32-S3 through its ROM, write or precisely edit a complete Arduino sketch, compile it on the phone, and retain failed source for repair. With Spark MCU firmware already running over Wi-Fi, it can identify the board, sample analog pins, control documented pins, servos and motors, and upload matching builds through OTA. It checks fresh serial output after USB flashing and reconnects to ping after Wi-Fi OTA. USB adapter names do not identify the exact board, wiring or LED pin. Unsupported chips are not assigned a compatible-looking build target.
+
+Flashing verifies the chip and retained binary. The first write shows the actual build and connected board for confirmation. **Allow corrected firmware for this task on this board connection** lets the agent flash repairs without asking again; the grant ends on Stop, a new task, changed project notes, app restart, or connection change. Serial evidence still needs to match the requested behavior; a successful write or silent monitor alone does not establish success.
+
+Try: “Identify my board, write a sketch that prints a heartbeat every second, compile and flash it, then check the output and fix any errors.” Android USB permission dialogs, uncertain wiring, and any necessary physical button actions still need the user. A bounded task that pauses can resume with **Continue** using saved code and results.
+
+The tool loop preserves Responses output items and message phases following [OpenAI conversation-state guidance](https://developers.openai.com/api/docs/guides/conversation-state). Inference uses the selected account model and the documented [ChatGPT plan flow](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
 While the app is running, local MCP clients can call the authenticated endpoint at `http://127.0.0.1:8847/mcp` to list USB devices, compile sketches, flash firmware, and monitor serial output. Copy or rotate its bearer token from the Scan tab. The endpoint listens on the phone's loopback address.
 
@@ -83,6 +91,10 @@ Example replies:
 ## Build with ESP32-S3 compilation support
 
 The APK always includes the ESP8266 toolchain. ESP32-S3 compilation is enabled when an Android arm64 `xtensa-esp32s3-elf-android-arm64.tar.xz` archive is available. Place it in `app/build/toolchain-cache/`, or set `spark.s3.toolchain.releaseTag` to a release containing that archive, then run `./gradlew assembleDebug`. The toolchain executables must be Android-compatible PIE binaries. See the [toolchain guide](firmware/toolchain/README.md) and [CI workflow](.github/workflows/xtensa-toolchain.yml) for how the archive is built.
+
+## Agent checks
+
+Run `./gradlew :app:testDebugUnitTest :app:assembleDebug`. With compiler binaries already staged locally, add `-Pspark.toolchain.skipFetch=true`. Tests cover saved failed sketches, revision-safe edits, stale build rejection, compiler diagnostics, serial cursors, flash-grant attachment binding, and the sequential repair loop with simulated tool results. They also check cancellation, duplicate tool calls, malformed response arguments, and incomplete streams. Real chip detection, firmware execution and USB re-enumeration require an attached board and are not established by these JVM tests.
 
 ## Repository layout
 

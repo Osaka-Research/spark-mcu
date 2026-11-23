@@ -6,7 +6,7 @@ package com.osakaresearch.spark.ai
  * and most self-hosted gateways all speak OpenAI-shape over a swappable
  * base URL, so they collapse into [Shape.OpenAI] + a custom host.
  */
-enum class Shape { OpenAI, Anthropic }
+enum class Shape { OpenAI, Anthropic, Responses }
 
 enum class AiProvider(
     val id: String,
@@ -21,6 +21,13 @@ enum class AiProvider(
         shape = Shape.OpenAI,
         defaultBaseUrl = "https://api.openai.com",
         defaultModel = "gpt-4o",
+    ),
+    ChatGPTPlan(
+        id = "chatgpt-plan",
+        displayName = "ChatGPT plan (sign in)",
+        shape = Shape.Responses,
+        defaultBaseUrl = "https://api.openai.com",
+        defaultModel = "",
     ),
     Anthropic(
         id = "anthropic",

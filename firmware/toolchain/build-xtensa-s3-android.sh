@@ -5,7 +5,7 @@
 #
 # Sibling of build-xtensa-android.sh (ESP8266/lx106). Kept separate rather
 # than parametrized because the pinned Espressif refs are different and the
-# gcc/newlib combo for S3 is on a much newer branch (gcc 13.2 vs lx106's
+# gcc/newlib combo for S3 is on a much newer branch (gcc 12.2 vs lx106's
 # gcc 10.3). A single script branching on TARGET would obscure which versions
 # ship with which artifact.
 #
@@ -35,16 +35,15 @@ if [[ "$TARGET" != "xtensa-esp32s3-elf" ]]; then
   exit 2
 fi
 
-# --- Pinned versions (arduino-esp32 3.x era, gcc 13.2) -----------------------
-# These tags track the toolchain that ships with ESP-IDF v5.1.x, which
-# arduino-esp32 3.x is built against. Bump when we move to IDF v5.2+.
-BINUTILS_REF="esp-2.41.0_20240530"
-GCC_REF="esp-13.2.0_20240530"
-NEWLIB_REF="esp-4.3.0_20240530"
+# Arduino-ESP32 3.0.5 uses esp-xs3@2302, including GCC 12.2 and newlib 4.1.
+# Match its compiler and reuse its target libraries from phase A.
+BINUTILS_REF="esp-2.39.0_20230208"
+GCC_REF="esp-12.2.0_20230208"
 GMP_VER="6.3.0"
 MPFR_VER="4.2.1"
 MPC_VER="1.3.1"
 ISL_VER="0.26"
+OVERLAY_REF="dd1cf19f6eb327a9db51043439974a6de13f5c7f"
 
 WORK="$HOME/xtensa-s3-canadian"
 SRC="$WORK/src"
@@ -88,11 +87,21 @@ fetch_tar() {
 
 fetch_git https://github.com/espressif/binutils-gdb.git     "$BINUTILS_REF" binutils
 fetch_git https://github.com/espressif/gcc.git              "$GCC_REF"      gcc
-fetch_git https://github.com/espressif/newlib-esp32.git     "$NEWLIB_REF"   newlib
+if [[ ! -d "$SRC/xtensa-overlays" ]]; then
+  git clone https://github.com/espressif/xtensa-overlays.git "$SRC/xtensa-overlays"
+fi
+git -C "$SRC/xtensa-overlays" fetch --depth 1 origin "$OVERLAY_REF"
+git -C "$SRC/xtensa-overlays" checkout --detach FETCH_HEAD
 fetch_tar "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz"       "gmp-${GMP_VER}"
 fetch_tar "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"    "mpfr-${MPFR_VER}"
 fetch_tar "https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz"       "mpc-${MPC_VER}"
 fetch_tar "https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz"     "isl-${ISL_VER}"
+
+# Keep Android-hosted binutils/GCC on the same S3 Xtensa configuration as
+# phase A's little-endian target libraries.
+for component in binutils gcc; do
+  cp -a "$SRC/xtensa-overlays/xtensa_esp32s3/$component/." "$SRC/$component/"
+done
 
 ln -sfn "$SRC/gmp-${GMP_VER}"   "$SRC/gcc/gmp"
 ln -sfn "$SRC/mpfr-${MPFR_VER}" "$SRC/gcc/mpfr"
@@ -128,6 +137,20 @@ mkdir -p "$PREFIX/$TARGET"
 cp -a "$PHASE_A_PREFIX/$TARGET/." "$PREFIX/$TARGET/"
 mkdir -p "$PREFIX/lib/gcc/$TARGET"
 cp -a "$PHASE_A_PREFIX/lib/gcc/$TARGET/." "$PREFIX/lib/gcc/$TARGET/"
+for archive in \
+  "$PREFIX/lib/gcc/$TARGET/12.2.0/libgcc.a" \
+  "$PREFIX/$TARGET/lib/libc.a"; do
+  test -s "$archive"
+  headers=$(readelf -h "$archive")
+  if [[ "$headers" == *'big endian'* ]]; then
+    echo "ERROR: refusing big-endian S3 target library: $archive" >&2
+    exit 1
+  fi
+  [[ "$headers" == *'little endian'* ]] || {
+    echo "ERROR: could not verify S3 target library: $archive" >&2
+    exit 1
+  }
+done
 
 echo "===== gcc (Canadian, $TARGET) ====="
 mkdir -p "$BLD/gcc" && cd "$BLD/gcc"
@@ -147,7 +170,7 @@ mkdir -p "$BLD/gcc" && cd "$BLD/gcc"
   --disable-libssp \
   --disable-libstdcxx-pch \
   --disable-multilib \
-  --disable-threads \
+  --enable-threads=posix \
   --disable-libmudflap \
   --disable-libgomp \
   --disable-libatomic \

@@ -51,6 +51,7 @@ class AiKeyStore(ctx: Context) {
         .remove(key(p, "model"))
         .apply()
 
+
     fun effectiveBaseUrl(p: AiProvider): String =
         baseUrl(p).ifBlank { p.defaultBaseUrl }
 

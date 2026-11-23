@@ -2,6 +2,7 @@ package com.osakaresearch.spark.net
 
 import android.content.Context
 import android.net.Uri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -72,7 +73,9 @@ object Ota {
                 if (resp.isSuccessful) OtaResult.Ok(size, body)
                 else OtaResult.Fail("HTTP ${resp.code}: $body")
             }
-        } catch (t: Throwable) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Exception) {
             OtaResult.Fail(t.message ?: "unknown")
         }
     }

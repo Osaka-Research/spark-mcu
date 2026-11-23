@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import com.osakaresearch.spark.compile.McuTarget
 import com.osakaresearch.spark.compile.SketchBuilder
 import com.osakaresearch.spark.compile.Toolchain
+import com.osakaresearch.spark.net.ChipDetection
 import com.osakaresearch.spark.net.FlashResult
 import com.osakaresearch.spark.net.Ota
 import com.osakaresearch.spark.net.OtaResult
@@ -88,7 +89,17 @@ fun FirmwareScreen() {
     var manualBoot by remember { mutableStateOf(false) }
     var building by remember { mutableStateOf(false) }
     val workspace = rememberSketchWorkspaceState()
-    var target by remember { mutableStateOf(McuTarget.Default) }
+    var detectingChip by remember { mutableStateOf(false) }
+    val sharedTarget by com.osakaresearch.spark.ai.SparkDeviceContext.selectedTarget.collectAsState()
+    var target by remember { mutableStateOf(sharedTarget) }
+    LaunchedEffect(sharedTarget, building, uploading) {
+        if (!building && !uploading && target != sharedTarget) {
+            target = sharedTarget
+            compiledS3Selected = false
+            selectedUri = null; selectedName = ""
+            offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+        }
+    }
     var blinkFolderUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var blinkFolderName by remember { mutableStateOf("") }
 
@@ -103,6 +114,22 @@ fun FirmwareScreen() {
     LaunchedEffect(mode, usbRefreshTick) {
         if (mode == FlashMode.USB) {
             usbDevices = UsbFlasher.listDevices(context)
+            if (usbDevices.size == 1 && !building && !uploading) {
+                detectingChip = true
+                try {
+                    when (val result = UsbFlasher.detectChip(context)) {
+                        is ChipDetection.Found -> {
+                            target = result.target
+                            compiledS3Selected = false
+                            offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                            log = log + "detected ${target.label} from chip ROM"
+                        }
+                        is ChipDetection.Fail -> log = log + "automatic chip detection: ${result.reason}"
+                    }
+                } finally {
+                    detectingChip = false
+                }
+            }
         }
     }
 
@@ -173,6 +200,7 @@ fun FirmwareScreen() {
                     onClick = {
                         if (!building && !uploading && target != t) {
                             target = t
+                            com.osakaresearch.spark.ai.SparkDeviceContext.selectTarget(context, t)
                             compiledS3Selected = false
                             offsetHex = if (t == McuTarget.ESP32_S3) "0x10000" else "0x0"
                         }
@@ -180,6 +208,29 @@ fun FirmwareScreen() {
                     shape = SegmentedButtonDefaults.itemShape(i, McuTarget.values().size),
                 ) { Text(t.label) }
             }
+        }
+        if (mode == FlashMode.USB) {
+            OutlinedButton(
+                enabled = !building && !uploading && !detectingChip && usbDevices.isNotEmpty(),
+                onClick = {
+                    detectingChip = true
+                    scope.launch {
+                        try {
+                            when (val result = UsbFlasher.detectChip(context, manualBoot)) {
+                                is ChipDetection.Found -> {
+                                    target = result.target
+                                    compiledS3Selected = false
+                                    offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+                                    log = log + "detected ${target.label} from chip ROM"
+                                }
+                                is ChipDetection.Fail -> log = log + "chip detection: ${result.reason}"
+                            }
+                        } finally {
+                            detectingChip = false
+                        }
+                    }
+                },
+            ) { Text(if (detectingChip) "Detecting chip…" else "Detect USB chip") }
         }
         Text(
             if (target.isAvailable(context)) target.detail
@@ -316,11 +367,9 @@ fun FirmwareScreen() {
             }
         }
 
-        // S3 blink validation: lets us exercise the flasher (reset sequence,
-        // image_v2 blobs, multi-offset plan) using arduino-cli output before
-        // the optional S3 compiler is packaged. Shown only when the user has
-        // picked ESP32-S3 + USB mode.
-        if (mode == FlashMode.USB && target == McuTarget.ESP32_S3) {
+        // Keep the precompiled recovery path for builds without the S3
+        // compiler. Normal app builds use the sketch compiler below.
+        if (mode == FlashMode.USB && target == McuTarget.ESP32_S3 && !target.isAvailable(context)) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

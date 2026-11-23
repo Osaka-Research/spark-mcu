@@ -28,12 +28,13 @@ object LibraryResolver {
     fun resolve(
         sketchSrcs: List<File>,
         coreDir: File,
+        extraLibraryRoots: List<File> = emptyList(),
         onLog: (String) -> Unit = {},
     ): Resolved {
-        val libRoot = File(coreDir, "libraries")
-        if (!libRoot.isDirectory) return Resolved(emptyList(), emptyList())
+        val libRoots = (listOf(File(coreDir, "libraries")) + extraLibraryRoots).filter { it.isDirectory }
+        if (libRoots.isEmpty()) return Resolved(emptyList(), emptyList())
 
-        val index = indexHeaders(libRoot)
+        val index = indexHeaders(libRoots)
 
         val visitedLibs = linkedSetOf<File>()   // library src dirs already pulled in
         val visitedFiles = linkedSetOf<File>()  // source/header files already scanned
@@ -88,12 +89,13 @@ object LibraryResolver {
      * match wins (library dirs are iterated in lexicographic order, which
      * gives a stable resolution across runs).
      */
-    private fun indexHeaders(libRoot: File): Map<String, File> {
+    private fun indexHeaders(libRoots: List<File>): Map<String, File> {
         val idx = mutableMapOf<String, File>()
-        libRoot.listFiles()
-            ?.filter { it.isDirectory }
-            ?.sortedBy { it.name }
-            ?.forEach { lib ->
+        libRoots.forEach { libRoot ->
+            libRoot.listFiles()
+                ?.filter { it.isDirectory && !it.name.startsWith(".") }
+                ?.sortedBy { it.name }
+                ?.forEach { lib ->
                 val srcDir = File(lib, "src").takeIf { it.isDirectory } ?: lib
                 srcDir.walkTopDown()
                     .filter { it.isFile && it.extension.lowercase() in setOf("h", "hpp") }
@@ -101,6 +103,7 @@ object LibraryResolver {
                         idx.putIfAbsent(h.name.lowercase(), srcDir)
                     }
             }
+        }
         return idx
     }
 }

@@ -32,10 +32,13 @@ Pins diverge by target:
 | target              | gcc/binutils/newlib ref     | phase-A driver                       |
 |---------------------|-----------------------------|--------------------------------------|
 | xtensa-lx106-elf    | `esp-2021r2-patch5` (gcc 10.3) | `ct-ng xtensa-lx106-elf`             |
-| xtensa-esp32s3-elf  | binutils `esp-2.41.0_20240530`, GCC `esp-13.2.0_20240530`, newlib `esp-4.3.0_20240530` | `build-xtensa-s3-phase-a.sh` |
+| xtensa-esp32s3-elf  | binutils `esp-2.39.0_20230208`, GCC `esp-12.2.0_20230208`, newlib `esp-4.1.0_20230208` | verified official Espressif release via `build-xtensa-s3-phase-a.sh` |
 
-Everything static. No shared libs — Bionic doesn't have the same dynamic
-linker glibc expects, and we don't want to ship glibc.
+S3 uses the exact target runtime from `esp-xs3@2302`, matching Arduino-ESP32
+3.0.5 and its precompiled ESP-IDF SDK. Rebuilding newlib with default options
+changes its reentrancy and locking ABI. Updating GCC alone is insufficient.
+The Android executables use Bionic and bundle the NDK's `libc++_shared.so`.
+The firmware's target libraries are static Xtensa archives.
 
 ## How to run it
 
@@ -45,8 +48,9 @@ Trigger from the GitHub Actions UI:
 2. **Run workflow** — tick `upload_release` to publish the tarball as a
    release asset.
 
-The run takes ~90 min on a free-tier ubuntu runner (phase A ~45 min,
-phase B ~30 min, rest is bookkeeping).
+The S3 bootstrap downloads a pinned, checksum-verified native compiler.
+Phase B builds the Android executables. The core staging step also compiles
+and links a sketch against the packaged headers and runtime before upload.
 
 ## Known fragility
 

@@ -21,14 +21,16 @@ object S3SketchBuilder {
         try {
             Toolchain.ensurePrepared(ctx)
             val binDir = Toolchain.binDir(ctx, target)
+            val nativeLibraryDir = File(ctx.applicationInfo.nativeLibraryDir)
             val gcc = Toolchain.bin(ctx, "${target.toolchainTriple}-gcc", target)
             val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++", target)
-            val sysroot = Toolchain.sysroot(ctx, target)
-            val gccLib = File(sysroot, "lib/gcc/${target.toolchainTriple}/13.2.0")
             val core = Toolchain.coreDir(ctx, target)
+            val sysroot = Toolchain.sysroot(ctx, target)
+            val gccVersion = target.gccVer
+            val gccLib = File(sysroot, "lib/gcc/${target.toolchainTriple}/$gccVersion")
             val sdk = File(core, "sdk")
             val coreA = File(core, "prebuilt/core.a")
-            listOf(gcc, gpp, coreA, File(sdk, "flags/ld_libs"), File(gccLib, "include/stdbool.h")).forEach {
+            listOf(gcc, gpp, coreA, File(sdk, "flags/ld_libs")).forEach {
                 require(it.isFile) { "ESP32-S3 asset missing: ${it.absolutePath}" }
             }
             val work = File(ctx.filesDir, "build/sketch-s3").apply {
@@ -37,7 +39,8 @@ object S3SketchBuilder {
             val sketch = SketchBuilder.preprocessSketch(inoFile, work)
             log("preprocess: ${sketch.inoCount} .ino file(s), ${sketch.extraSources.size} sibling source(s)")
             val libs = LibraryResolver.resolve(
-                listOf(sketch.mergedIno) + sketch.extraSources, core
+                listOf(sketch.mergedIno) + sketch.extraSources, core,
+                listOf(ArduinoLibraryManager.libraryRoot(ctx))
             ) { log(it) }
 
             val defines = listOf(
@@ -50,11 +53,14 @@ object S3SketchBuilder {
                 "-DARDUINO_USB_DFU_ON_BOOT=0",
             )
             val includes = buildList {
-                // GCC was built for an /opt prefix. Its real headers live in
-                // the APK assets after extraction, so supply those paths here.
+                // GCC's relocated Android executable cannot infer its original
+                // prefix from the JNI symlink. Supply its standard headers.
+                val cxx = File(sysroot, "include/c++/$gccVersion")
+                add("-isystem"); add(cxx.absolutePath)
+                add("-isystem"); add(File(cxx, target.toolchainTriple).absolutePath)
+                add("-isystem"); add(File(cxx, "backward").absolutePath)
                 add("-isystem"); add(File(gccLib, "include").absolutePath)
-                add("-isystem"); add(File(sysroot, "include/c++/13.2.0").absolutePath)
-                add("-isystem"); add(File(sysroot, "include/c++/13.2.0/${target.toolchainTriple}").absolutePath)
+                add("-isystem"); add(File(gccLib, "include-fixed").absolutePath)
                 add("-isystem"); add(File(sysroot, "include").absolutePath)
                 add("-I${core.absolutePath}/cores/esp32")
                 add("-I${core.absolutePath}/variants/esp32s3")
@@ -77,7 +83,6 @@ object S3SketchBuilder {
                 val cmd = buildList {
                     add(compiler.absolutePath)
                     add("-B"); add(binDir.absolutePath + "/")
-                    add("--sysroot=${sysroot.absolutePath}")
                     add("@${File(sdk, "flags/$flagsFile").absolutePath}")
                     add("-Os"); add("-Werror=return-type")
                     addAll(defines)
@@ -87,7 +92,7 @@ object S3SketchBuilder {
                     add(src.absolutePath)
                     add("-o"); add(obj.absolutePath)
                 }
-                val (exit, output) = SketchBuilder.runProcess(cmd, work, binDir)
+                val (exit, output) = SketchBuilder.runProcess(cmd, work, binDir, nativeLibraryDir)
                 if (exit != 0 || !obj.isFile) {
                     log(output.trimEnd())
                     return@withContext SketchBuilder.Result.Fail(
@@ -102,18 +107,16 @@ object S3SketchBuilder {
             val link = buildList {
                 add(gpp.absolutePath)
                 add("-B"); add(binDir.absolutePath + "/")
-                add("-B"); add(gccLib.absolutePath + "/")
-                add("--sysroot=${sysroot.absolutePath}")
-                // ESP-IDF supplies startup code and standard libraries in the
-                // prebuilt SDK. The generic newlib crt0.o is not part of it.
+                // ESP-IDF supplies startup and runtime libraries explicitly;
+                // GCC's default crt objects and -lnosys are not in this core.
                 add("-nostdlib")
                 add("@${File(sdk, "flags/ld_flags").absolutePath}")
                 add("@${File(sdk, "flags/ld_scripts").absolutePath}")
                 add("-Wl,--Map=${File(work, "sketch.map").absolutePath}")
                 add("-L${File(sdk, "lib").absolutePath}")
-                add("-L${File(sdk, "ld").absolutePath}")
                 add("-L${gccLib.absolutePath}")
                 add("-L${File(sysroot, "lib").absolutePath}")
+                add("-L${File(sdk, "ld").absolutePath}")
                 val memory = File(sdk, "qio_qspi")
                 if (memory.isDirectory) add("-L${memory.absolutePath}")
                 add("-Wl,--wrap=esp_panic_handler")
@@ -125,7 +128,7 @@ object S3SketchBuilder {
                 add("-Wl,-EL")
                 add("-o"); add(elf.absolutePath)
             }
-            val (linkExit, linkOutput) = SketchBuilder.runProcess(link, work, binDir)
+            val (linkExit, linkOutput) = SketchBuilder.runProcess(link, work, binDir, nativeLibraryDir)
             if (linkExit != 0 || !elf.isFile) {
                 log(linkOutput.trimEnd())
                 return@withContext SketchBuilder.Result.Fail(

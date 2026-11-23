@@ -23,10 +23,8 @@ import java.security.MessageDigest
  * The non-obvious piece is flash-segment alignment. S3 memory-maps flash via
  * the MMU on 64 KB pages, so any segment loading into IROM/DROM must land at
  * an offset in the image whose low 16 bits match the segment's load address.
- * Esptool achieves this by inserting dummy "padding segments" (addr=0, zero
- * data) before each flash segment. We do the same, because arduino-esp32's
- * linker emits RAM and flash segments interleaved and the ROM loader won't
- * remap them for us.
+ * Flash sections are written first, with RAM data filling alignment gaps.
+ * This keeps esp_app_desc at image offset 0x20 as required by ESP-IDF.
  */
 object Elf2ImageEsp32 {
 
@@ -103,14 +101,55 @@ object Elf2ImageEsp32 {
         maxChipRevFull: Int = 0xFFFF,
     ): ByteArray {
         val parsed = parseElf(appElf)
-        val allSegments = parsed.loadSegments
-        require(allSegments.isNotEmpty()) { "${appElf.name}: no PT_LOAD segments with data" }
+        val sections = parsed.loadSegments
+        require(sections.isNotEmpty()) { "${appElf.name}: no loadable sections with data" }
 
-        // Esptool writes all RAM segments first, then each flash segment preceded
-        // by a padding segment that eats bytes until the flash segment's data
-        // lands on a 64 KB boundary matching its load address.
-        val ramSegs   = allSegments.filterNot { isFlashAddr(it.addr, chipId) }
+        // ESP-IDF reserves this field in .flash.appdesc for the ELF digest.
+        // Patch before computing either the segment checksum or image digest.
+        val appDesc = sections.firstOrNull {
+            it.name == ".flash.appdesc" && isFlashAddr(it.addr, chipId)
+        }
+        if (appDesc != null) {
+            require(appDesc.data.size >= 0xB0 &&
+                appDesc.data.sliceArray(0x90 until 0xB0).all { it == 0.toByte() }) {
+                "${appElf.name}: invalid ELF digest field in app description"
+            }
+            val elfHash = MessageDigest.getInstance("SHA-256")
+            appElf.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    elfHash.update(buffer, 0, count)
+                }
+            }
+            elfHash.digest().copyInto(appDesc.data, 0x90)
+        }
+
+        // Merge contiguous sections before aligning flash mappings. Otherwise
+        // .flash.appdesc and .flash.rodata would occupy separate MMU pages.
+        val allSegments = mutableListOf<LoadSegment>()
+        for (section in sections.sortedBy { it.addr }) {
+            val previous = allSegments.lastOrNull()
+            if (previous != null && previous.addr + previous.data.size == section.addr &&
+                isFlashAddr(previous.addr, chipId) == isFlashAddr(section.addr, chipId)) {
+                allSegments[allSegments.lastIndex] = previous.copy(data = previous.data + section.data)
+            } else {
+                allSegments.add(section)
+            }
+        }
+        val ramSegs = allSegments.filterNot { isFlashAddr(it.addr, chipId) }.toMutableList()
         val flashSegs = allSegments.filter { isFlashAddr(it.addr, chipId) }.sortedBy { it.addr }
+        flashSegs.zipWithNext().forEach { (a, b) ->
+            require(a.addr / IROM_ALIGN != b.addr / IROM_ALIGN) {
+                "${appElf.name}: separate flash sections share an MMU page"
+            }
+        }
+        if (appDesc != null) {
+            require(flashSegs.firstOrNull()?.addr == appDesc.addr && appDesc.addr % IROM_ALIGN == 0x20L) {
+                "${appElf.name}: app description must be the first flash data at offset 0x20"
+            }
+        }
 
         val out = ByteArrayOutputStream()
         // Reserve header bytes; we patch num_segments at the end since the
@@ -121,31 +160,35 @@ object Elf2ImageEsp32 {
         var checksum = CHECKSUM_SEED
         var segCount = 0
 
-        for (seg in ramSegs) {
+        fun appendSegment(seg: LoadSegment) {
             writeSegment(out, seg)
             checksum = seg.data.fold(checksum) { acc, b -> acc xor (b.toInt() and 0xFF) }
             segCount++
         }
 
         for (seg in flashSegs) {
-            // Where seg.data WOULD land if we wrote it with no padding before.
-            val segmentDataOffset = out.size() + SEG_HEADER_LEN
-            var padLen = (seg.addr.toInt() - segmentDataOffset).mod(IROM_ALIGN)
-            if (padLen != 0) {
-                // The pad segment carries its own 8-byte header, so subtract
-                // that from its data length. If the remainder is negative,
-                // bump by one full IROM_ALIGN so the real segment still ends
-                // up aligned on the following page.
-                padLen -= SEG_HEADER_LEN
+            while ((out.size() + SEG_HEADER_LEN) % IROM_ALIGN != (seg.addr % IROM_ALIGN).toInt()) {
+                // Match esptool's placement on the next MMU page, including
+                // cases where the required padding exceeds one page.
+                var padLen = IROM_ALIGN - out.size() % IROM_ALIGN +
+                    (seg.addr % IROM_ALIGN).toInt() - 2 * SEG_HEADER_LEN
                 if (padLen < 0) padLen += IROM_ALIGN
-                writeSegment(out, LoadSegment(0L, ByteArray(padLen)))
-                // Pad data is zero, so it contributes 0 to the XOR checksum.
-                segCount++
+                if (ramSegs.isNotEmpty() && padLen > SEG_HEADER_LEN) {
+                    val ram = ramSegs.removeAt(0)
+                    val count = minOf(padLen, ram.data.size)
+                    appendSegment(ram.copy(data = ram.data.copyOfRange(0, count)))
+                    if (count < ram.data.size) {
+                        ramSegs.add(0, ram.copy(addr = ram.addr + count,
+                            data = ram.data.copyOfRange(count, ram.data.size)))
+                    }
+                } else {
+                    appendSegment(LoadSegment(0L, ByteArray(padLen)))
+                }
             }
-            writeSegment(out, seg)
-            checksum = seg.data.fold(checksum) { acc, b -> acc xor (b.toInt() and 0xFF) }
-            segCount++
+            appendSegment(seg)
         }
+        ramSegs.forEach { appendSegment(it) }
+        require(segCount in 1..16) { "${appElf.name}: image has too many segments ($segCount)" }
 
         // esptool/elf2bin convention: pad with zeros so the checksum byte lands
         // at (next multiple of 16) - 1. Image length before SHA-256 is therefore
@@ -192,19 +235,20 @@ object Elf2ImageEsp32 {
     }
 
     private fun writeSegment(out: OutputStream, seg: LoadSegment) {
+        require(seg.data.size % 4 == 0 && seg.data.size < 0x1000000) {
+            "invalid image segment length: ${seg.data.size}"
+        }
         writeU32Le(out, seg.addr)
         writeU32Le(out, seg.data.size.toLong())
         out.write(seg.data)
     }
 
-    private data class LoadSegment(val addr: Long, val data: ByteArray)
+    private data class LoadSegment(val addr: Long, val data: ByteArray, val name: String = "")
     private data class ParsedElf(val entry: Long, val loadSegments: List<LoadSegment>)
 
     /**
-     * ELF32-LE program-header reader. Unlike the ESP8266 path we deliberately
-     * do NOT walk section headers — esptool's reference implementation reads
-     * PT_LOAD program headers, and matching that is the only way to end up
-     * byte-identical to arduino-cli output for the same ELF.
+     * Read initialized ELF32-LE sections, matching esptool's default elf2image
+     * input. BSS and other NOBITS sections are initialized by startup code.
      */
     private fun parseElf(file: File): ParsedElf {
         RandomAccessFile(file, "r").use { raf ->
@@ -220,31 +264,40 @@ object Elf2ImageEsp32 {
             if (bb.get(5).toInt() != 1) throw IllegalStateException("${file.name}: not little-endian")
 
             val entry     = bb.getInt(24).toLong() and 0xFFFFFFFFL
-            val phoff     = bb.getInt(28).toLong() and 0xFFFFFFFFL
-            val phentsize = bb.getShort(42).toInt() and 0xFFFF
-            val phnum     = bb.getShort(44).toInt() and 0xFFFF
-            if (phentsize != 0x20) throw IllegalStateException(
-                "${file.name}: unexpected program header entry size 0x${phentsize.toString(16)}"
-            )
-
-            raf.seek(phoff)
-            val phBytes = ByteArray(phnum * phentsize)
-            raf.readFully(phBytes)
-            val phb = ByteBuffer.wrap(phBytes).order(ByteOrder.LITTLE_ENDIAN)
+            val shoff = bb.getInt(32).toLong() and 0xFFFFFFFFL
+            val shentsize = bb.getShort(46).toInt() and 0xFFFF
+            val shnum = bb.getShort(48).toInt() and 0xFFFF
+            val shstrndx = bb.getShort(50).toInt() and 0xFFFF
+            require(shentsize == 0x28 && shnum > 0 && shstrndx in 0 until shnum) {
+                "${file.name}: invalid ELF section table"
+            }
+            fun readData(offset: Long, size: Long): ByteArray {
+                require(size in 0..Int.MAX_VALUE.toLong() && offset >= 0 && offset + size <= raf.length()) {
+                    "${file.name}: ELF section extends beyond file"
+                }
+                raf.seek(offset)
+                return ByteArray(size.toInt()).also { raf.readFully(it) }
+            }
+            val shb = ByteBuffer.wrap(readData(shoff, (shnum * shentsize).toLong()))
+                .order(ByteOrder.LITTLE_ENDIAN)
+            fun field(index: Int, offset: Int): Long =
+                shb.getInt(index * shentsize + offset).toLong() and 0xFFFFFFFFL
+            val names = readData(field(shstrndx, 16), field(shstrndx, 20))
 
             val segs = mutableListOf<LoadSegment>()
-            for (i in 0 until phnum) {
-                val base   = i * phentsize
-                val type   = phb.getInt(base)
-                if (type != 1) continue  // PT_LOAD only
-                val offset = phb.getInt(base + 4).toLong() and 0xFFFFFFFFL
-                val paddr  = phb.getInt(base + 12).toLong() and 0xFFFFFFFFL
-                val filesz = phb.getInt(base + 16).toLong() and 0xFFFFFFFFL
-                if (filesz == 0L) continue
-                raf.seek(offset)
-                val data = ByteArray(filesz.toInt())
-                raf.readFully(data)
-                segs.add(LoadSegment(paddr, data))
+            for (i in 0 until shnum) {
+                // PROGBITS, INIT_ARRAY, FINI_ARRAY and PREINIT_ARRAY.
+                if (field(i, 4).toInt() !in setOf(1, 14, 15, 16)) continue
+                val addr = field(i, 12)
+                val size = field(i, 20)
+                if (addr == 0L || size == 0L) continue
+                val nameOffset = field(i, 0).toInt()
+                require(nameOffset in names.indices) { "${file.name}: invalid section name" }
+                var nameEnd = nameOffset
+                while (nameEnd < names.size && names[nameEnd] != 0.toByte()) nameEnd++
+                val name = String(names, nameOffset, nameEnd - nameOffset, Charsets.UTF_8)
+                val data = readData(field(i, 16), size)
+                segs.add(LoadSegment(addr, data.copyOf((data.size + 3) and -4), name))
             }
             return ParsedElf(entry, segs)
         }

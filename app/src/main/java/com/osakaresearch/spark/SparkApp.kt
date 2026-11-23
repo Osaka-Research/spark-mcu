@@ -48,7 +48,7 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
     data object Ai : Tab("ai", "AI", Icons.Outlined.AutoAwesome)
 }
 
-private val Tabs = listOf(Tab.Scan, Tab.Control, Tab.Monitor, Tab.Firmware, Tab.Ai)
+private val Tabs = listOf(Tab.Ai, Tab.Scan, Tab.Control, Tab.Monitor, Tab.Firmware)
 
 @Composable
 fun SparkApp() {
@@ -82,7 +82,7 @@ fun SparkApp() {
         ) { padding ->
             NavHost(
                 navController = nav,
-                startDestination = Tab.Scan.route,
+                startDestination = Tab.Ai.route,
                 modifier = Modifier.padding(padding),
             ) {
                 composable(Tab.Scan.route) { ScanScreen() }

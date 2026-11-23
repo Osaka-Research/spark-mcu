@@ -146,7 +146,7 @@ tasks.register("extractS3Toolchain") {
         // archive has a few alias entries, so extract their targets and copy
         // the aliases as ordinary files after tar finishes.
         val hardLinkAliases = mapOf(
-            "bin/xtensa-esp32s3-elf-gcc-13.2.0" to "bin/xtensa-esp32s3-elf-gcc",
+            "bin/xtensa-esp32s3-elf-gcc-12.2.0" to "bin/xtensa-esp32s3-elf-gcc",
             "bin/xtensa-esp32s3-elf-ld" to "bin/xtensa-esp32s3-elf-ld.bfd",
             "bin/xtensa-esp32s3-elf-c++" to "bin/xtensa-esp32s3-elf-g++",
             "xtensa-esp32s3-elf/lib/libg.a" to "xtensa-esp32s3-elf/lib/libc.a",
@@ -174,51 +174,48 @@ tasks.register("extractS3Toolchain") {
         if (!binDir.isDirectory || !targetDir.isDirectory || !coreDir.isDirectory) {
             throw GradleException("S3 tarball needs bin/, $target/, and arduino-core-esp32/ at root")
         }
-        val gcc = File(binDir, "$target-gcc")
-        val elfHeader = gcc.inputStream().use { it.readNBytes(20) }
-        val isPie = elfHeader.size >= 20 &&
-            elfHeader[0] == 0x7f.toByte() &&
-            elfHeader[1] == 'E'.code.toByte() &&
-            elfHeader[2] == 'L'.code.toByte() &&
-            elfHeader[3] == 'F'.code.toByte() &&
-            elfHeader[16] == 3.toByte() && elfHeader[17] == 0.toByte()
-        if (!isPie) {
-            throw GradleException("S3 toolchain gcc is not an Android-compatible PIE executable; rebuild the archive with -fPIE -pie")
+        verifyS3AndroidExecutable(File(binDir, "$target-gcc"))
+        verifyLittleEndianArchive(File(stage, "lib/gcc/$target/12.2.0/libgcc.a"))
+        verifyLittleEndianArchive(File(targetDir, "lib/libc.a"))
+        verifyLittleEndianArchive(File(targetDir, "lib/libstdc++.a"))
+        val cxxRuntime = File(stage, "libc++_shared.so")
+        val cxxDestination = File(toolchainJniLibsDir, "libc++_shared.so")
+        if (!cxxRuntime.isFile) {
+            throw GradleException("S3 toolchain archive is missing libc++_shared.so")
         }
+        // Remove helpers and versioned aliases from the previous S3 archive.
+        toolchainJniLibsDir.listFiles()?.filter {
+            it.name.startsWith("lib$target-") || it.name.startsWith("libs3_")
+        }?.forEach { it.delete() }
+        cxxRuntime.copyTo(cxxDestination, overwrite = true)
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
+            verifyS3AndroidExecutable(bin)
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
             val dest = File(toolchainJniLibsDir, "lib${if (helper) "s3_" else ""}${bin.name}.so")
             bin.copyTo(dest, overwrite = true)
             dest.setExecutable(true)
         }
         val helperSources = listOf(
+            // The target/bin helpers in the staged GCC archive are the
+            // x86_64-hosted originals. Use the Android-hosted cross tools
+            // from bin/ for the helpers that run on the phone.
             File(binDir, "$target-as") to "as",
-            File(binDir, "$target-ld.bfd") to "ld",
-            File(stage, "libexec/gcc/$target/13.2.0/cc1") to "cc1",
-            File(stage, "libexec/gcc/$target/13.2.0/cc1plus") to "cc1plus",
-            File(stage, "libexec/gcc/$target/13.2.0/collect2") to "collect2",
-            File(stage, "libexec/gcc/$target/13.2.0/lto1") to "lto1",
-            File(stage, "libexec/gcc/$target/13.2.0/lto-wrapper") to "lto-wrapper",
+            File(binDir, "$target-ld") to "ld",
+            File(stage, "libexec/gcc/$target/12.2.0/cc1") to "cc1",
+            File(stage, "libexec/gcc/$target/12.2.0/cc1plus") to "cc1plus",
+            File(stage, "libexec/gcc/$target/12.2.0/collect2") to "collect2",
+            File(stage, "libexec/gcc/$target/12.2.0/lto1") to "lto1",
+            File(stage, "libexec/gcc/$target/12.2.0/lto-wrapper") to "lto-wrapper",
         )
         helperSources.forEach { (src, name) ->
             if (!src.isFile) {
                 if (name in setOf("lto1", "lto-wrapper")) return@forEach
                 throw GradleException("S3 toolchain missing helper: ${src.absolutePath}")
             }
-            val header = src.inputStream().use { it.readNBytes(20) }
-            if (header.size < 20 || header[18] != 183.toByte() || header[19] != 0.toByte()) {
-                throw GradleException("S3 helper $name is not an Android arm64 executable: ${src.absolutePath}")
-            }
+            verifyS3AndroidExecutable(src)
             src.copyTo(File(toolchainJniLibsDir, "libs3_$name.so"), overwrite = true)
+                .setExecutable(true)
         }
-        val libcxx = File(stage, "libc++_shared.so").takeIf { it.isFile }
-            ?: (project.findProperty("spark.s3.libcxx.path") as String?)
-                ?.let(::File)?.takeIf { it.isFile }
-            ?: throw GradleException(
-                "S3 toolchain needs libc++_shared.so. Use an updated toolchain archive " +
-                    "or set -Pspark.s3.libcxx.path=/path/to/NDK/libc++_shared.so"
-            )
-        libcxx.copyTo(File(toolchainJniLibsDir, "libc++_shared.so"), overwrite = true)
         val assets = File(toolchainAssetsDir, target)
         assets.deleteRecursively()
         targetDir.copyRecursively(assets, overwrite = true)
@@ -230,12 +227,26 @@ tasks.register("extractS3Toolchain") {
         coreAssets.deleteRecursively()
         coreDir.copyRecursively(coreAssets, overwrite = true)
         stamp.writeText("sha256=${sha256(tarball)}\n")
+        stage.deleteRecursively()
     }
 }
 
 afterEvaluate {
     tasks.named("preBuild") {
         dependsOn("extractS3Toolchain")
+    }
+}
+
+fun verifyS3AndroidExecutable(binary: File) {
+    val header = binary.inputStream().use { it.readNBytes(20) }
+    val arm64Pie = header.size == 20 &&
+        header[0] == 0x7f.toByte() && header[1] == 'E'.code.toByte() &&
+        header[2] == 'L'.code.toByte() && header[3] == 'F'.code.toByte() &&
+        header[4] == 2.toByte() && header[5] == 1.toByte() &&
+        header[16] == 3.toByte() && header[17] == 0.toByte() &&
+        header[18] == 183.toByte() && header[19] == 0.toByte()
+    if (!arm64Pie) {
+        throw GradleException("S3 tool ${binary.name} must be an AArch64 PIE executable for Android")
     }
 }
 
@@ -270,6 +281,38 @@ fun sha256(file: File): String {
         while (true) { val n = s.read(buf); if (n <= 0) break; md.update(buf, 0, n) }
     }
     return md.digest().joinToString("") { "%02x".format(it) }
+}
+
+fun verifyLittleEndianArchive(archive: File) {
+    if (!archive.isFile) throw GradleException("S3 toolchain missing ${archive.name}")
+    val bytes = archive.readBytes()
+    val magic = "!<arch>\n".toByteArray(Charsets.US_ASCII)
+    if (bytes.size < magic.size || !bytes.copyOfRange(0, magic.size).contentEquals(magic)) {
+        throw GradleException("${archive.name} is not an ar archive")
+    }
+    var pos = magic.size
+    var elfMembers = 0
+    while (pos + 60 <= bytes.size) {
+        val size = bytes.copyOfRange(pos + 48, pos + 58)
+            .toString(Charsets.US_ASCII).trim().toIntOrNull()
+            ?: throw GradleException("invalid member size in ${archive.name}")
+        val body = pos + 60
+        if (size < 0 || body + size > bytes.size) {
+            throw GradleException("truncated member in ${archive.name}")
+        }
+        if (size >= 6 && bytes[body] == 0x7f.toByte() &&
+            bytes[body + 1] == 'E'.code.toByte() &&
+            bytes[body + 2] == 'L'.code.toByte() &&
+            bytes[body + 3] == 'F'.code.toByte()
+        ) {
+            elfMembers++
+            if (bytes[body + 5] != 1.toByte()) {
+                throw GradleException("${archive.name} contains a non-little-endian object; rebuild the S3 toolchain")
+            }
+        }
+        pos = body + size + (size and 1)
+    }
+    if (elfMembers == 0) throw GradleException("${archive.name} has no ELF objects to verify")
 }
 
 android {
@@ -320,6 +363,10 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("androidx.activity:activity-compose:1.9.3")
+    val cameraX = "1.4.1"
+    implementation("androidx.camera:camera-camera2:$cameraX")
+    implementation("androidx.camera:camera-lifecycle:$cameraX")
+    implementation("androidx.camera:camera-view:$cameraX")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -337,6 +384,9 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -10,6 +10,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        com.osakaresearch.spark.ai.SparkDeviceContext.initialize(applicationContext)
         McpService.start(applicationContext)
         setContent {
             SparkApp()
