@@ -445,6 +445,15 @@ object SketchBuilder {
             .redirectErrorStream(true)
         pb.environment()["PATH"] =
             "${binDir.absolutePath}:${pb.environment()["PATH"].orEmpty()}"
+        // Toolchain executables are symlinks into nativeLibraryDir. Android's
+        // dynamic linker does not search that directory for a child process
+        // unless we include it explicitly (the S3 compiler needs libc++_shared.so).
+        val nativeDir = requireNotNull(File(cmd.first()).canonicalFile.parentFile)
+        if (File(nativeDir, "libc++_shared.so").isFile) {
+            val previous = pb.environment()["LD_LIBRARY_PATH"].orEmpty()
+            pb.environment()["LD_LIBRARY_PATH"] =
+                if (previous.isEmpty()) nativeDir.absolutePath else "${nativeDir.absolutePath}:$previous"
+        }
         val proc = pb.start()
         val out = proc.inputStream.bufferedReader().readText()
         val exit = proc.waitFor()

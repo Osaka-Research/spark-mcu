@@ -255,8 +255,10 @@ object UsbFlasher {
         manager: UsbManager,
         driver: UsbSerialDriver,
     ): Boolean = suspendCancellableCoroutine { cont: CancellableContinuation<Boolean> ->
+        // UsbManager adds EXTRA_DEVICE and EXTRA_PERMISSION_GRANTED to this
+        // callback. An immutable PendingIntent discards those extras.
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-            PendingIntent.FLAG_IMMUTABLE else 0
+            PendingIntent.FLAG_MUTABLE else 0
         val intent = PendingIntent.getBroadcast(
             context, 0, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
         )

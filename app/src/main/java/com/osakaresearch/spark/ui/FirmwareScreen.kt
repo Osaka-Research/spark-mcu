@@ -60,7 +60,6 @@ import com.osakaresearch.spark.net.SparkConnState
 import com.osakaresearch.spark.net.UsbDeviceInfo
 import com.osakaresearch.spark.net.UsbFlasher
 import kotlinx.coroutines.launch
-import java.io.File
 
 private enum class FlashMode(val label: String) { WIFI("WiFi OTA"), USB("USB") }
 
@@ -88,8 +87,7 @@ fun FirmwareScreen() {
     var usbRefreshTick by remember { mutableIntStateOf(0) }
     var manualBoot by remember { mutableStateOf(false) }
     var building by remember { mutableStateOf(false) }
-    var sketchUri by remember { mutableStateOf<android.net.Uri?>(null) }
-    var sketchName by remember { mutableStateOf("") }
+    val workspace = rememberSketchWorkspaceState()
     var target by remember { mutableStateOf(McuTarget.Default) }
     var blinkFolderUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var blinkFolderName by remember { mutableStateOf("") }
@@ -119,33 +117,8 @@ fun FirmwareScreen() {
         }
     }
 
-    val sketchPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            sketchUri = uri
-            sketchName = resolveSketchName(context, uri)
-            log = log + "sketch: $sketchName"
-        }
-    }
-
-    // Folder picker: user selects a sketch folder (foo/ with foo.ino + optional
-    // siblings). We stash the tree Uri and defer the actual copy to build time
-    // so the on-disk state always reflects what's being built.
-    val folderPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            sketchUri = uri
-            sketchName = androidx.documentfile.provider.DocumentFile
-                .fromTreeUri(context, uri)?.name ?: "sketch/"
-            log = log + "sketch folder: $sketchName"
-        }
-    }
-
-    // Separate tree picker for the precompiled S3 Blink folder. Kept distinct
-    // from folderPicker so switching between compile- and precompiled-flows
-    // doesn't clobber either selection.
+    // Separate tree picker for the precompiled S3 Blink folder so it does not
+    // replace the editable project in the workspace below.
     val blinkFolderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -455,9 +428,16 @@ fun FirmwareScreen() {
             }
         }
 
-        // The S3 build card appears once the optional compiler and core assets
-        // have been packaged into this APK.
+        // The editor is backed by a real app-private sketch directory. The
+        // builder receives the primary .ino from this workspace and already
+        // knows how to merge sibling .ino files and compile C/C++ sources.
         if (target.isAvailable(context)) {
+            SketchWorkspaceCard(
+                state = workspace,
+                enabled = !building && !uploading,
+                onStatus = { line -> log = log + line },
+            )
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -475,84 +455,53 @@ fun FirmwareScreen() {
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     )
                     Spacer(Modifier.height(10.dp))
-
-                    Text(
-                    if (sketchUri == null) "no sketch selected (demo Blink will be used)" else sketchName,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                )
-                Spacer(Modifier.height(10.dp))
-                Row {
-                    OutlinedButton(
-                        onClick = { sketchPicker.launch(arrayOf("*/*")) },
-                        enabled = !building,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Pick .ino") }
-                    Spacer(Modifier.width(10.dp))
-                    OutlinedButton(
-                        onClick = { folderPicker.launch(null) },
-                        enabled = !building,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Pick folder") }
-                }
-                Spacer(Modifier.height(10.dp))
-                Row {
-                    Button(
-                        onClick = {
-                            if (building) return@Button
-                            building = true
-                            compiledS3Selected = false
-                            scope.launch {
-                                val picked = sketchUri
-                                val ino: File = if (picked != null) {
-                                    val ok = materializeSketch(context, picked, sketchName)
-                                    if (ok == null) {
-                                        log = log + "failed to read picked sketch"
-                                        building = false
-                                        return@launch
+                    Row {
+                        Button(
+                            onClick = {
+                                if (building) return@Button
+                                val ino = workspace.primarySketch()
+                                if (ino == null) {
+                                    log = log + "project needs a top-level .ino file"
+                                    return@Button
+                                }
+                                building = true
+                                compiledS3Selected = false
+                                scope.launch {
+                                    val slug = ino.nameWithoutExtension
+                                    log = log + "compiling ${ino.name} for ${target.label} ..."
+                                    val result = SketchBuilder.buildSketch(context, ino, target) { line ->
+                                        log = log + line
                                     }
-                                    ok
-                                } else {
-                                    File(context.filesDir, "sketches/blink/blink.ino").apply {
-                                        parentFile?.mkdirs()
-                                        writeText(BLINK_INO)
+                                    log = log + when (result) {
+                                        is SketchBuilder.Result.Ok ->
+                                            "ok: ${result.output.name} (${result.output.length()} bytes)"
+                                        is SketchBuilder.Result.Fail ->
+                                            "failed: ${result.reason}"
                                     }
-                                }
-                                val slug = ino.nameWithoutExtension
-                                log = log + "compiling ${ino.name} for ${target.label} ..."
-                                val result = SketchBuilder.buildSketch(context, ino, target) { line ->
-                                    log = log + line
-                                }
-                                log = log + when (result) {
-                                    is SketchBuilder.Result.Ok ->
-                                        "ok: ${result.output.name} (${result.output.length()} bytes)"
-                                    is SketchBuilder.Result.Fail ->
-                                        "failed: ${result.reason}"
-                                }
-                                // Persist the fresh bin to Downloads/ so it survives the
-                                // next build's work-dir wipe, and auto-select it for flashing.
-                                if (result is SketchBuilder.Result.Ok) {
-                                    val exported = BinExport.save(context, slug, result.output.readBytes())
-                                    if (exported != null) {
-                                        selectedUri = exported.uri
-                                        selectedName = exported.displayName
-                                        compiledS3Selected = target == McuTarget.ESP32_S3
-                                        log = log + "saved: ${exported.humanPath}"
-                                    } else {
-                                        log = log + "bin export failed"
+                                    // Persist the fresh bin to Downloads/ so it survives the
+                                    // next build's work-dir wipe, and auto-select it for flashing.
+                                    if (result is SketchBuilder.Result.Ok) {
+                                        val exported = BinExport.save(context, slug, result.output.readBytes())
+                                        if (exported != null) {
+                                            selectedUri = exported.uri
+                                            selectedName = exported.displayName
+                                            compiledS3Selected = target == McuTarget.ESP32_S3
+                                            log = log + "saved: ${exported.humanPath}"
+                                        } else {
+                                            log = log + "bin export failed"
+                                        }
+                                        val elfExport = BinExport.saveAs(context, slug, "elf", result.elf.readBytes())
+                                        log = log + (elfExport?.let { "saved: ${it.humanPath}" } ?: "elf export failed")
                                     }
-                                    val elfExport = BinExport.saveAs(context, slug, "elf", result.elf.readBytes())
-                                    log = log + (elfExport?.let { "saved: ${it.humanPath}" } ?: "elf export failed")
+                                    building = false
                                 }
-                                building = false
-                            }
-                        },
-                        enabled = !building && !uploading,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (building) "Building" else "Compile") }
+                            },
+                            enabled = !building && !uploading,
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (building) "Building project" else "Compile project") }
+                    }
                 }
             }
-          }
         }
 
         Card(
@@ -618,19 +567,6 @@ private class OpenDocumentInDownloads : ActivityResultContracts.OpenDocument() {
         return intent
     }
 }
-
-private val BLINK_INO = """
-void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
-}
-
-void loop() {
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(500);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(500);
-}
-""".trimIndent()
 
 @Composable
 private fun WifiTarget(
@@ -763,116 +699,3 @@ private fun parseOffset(s: String): Int? {
         else t.toLong(16).toInt()
     } catch (_: Throwable) { null }
 }
-
-/**
- * Pulls the user-visible display name out of a SAF Uri. SAF Uris don't carry
- * a filesystem path — only a documentId — so ContentResolver.query is the
- * only reliable way to recover the original filename for logging and for
- * naming the on-disk copy under `sketches/<slug>/`.
- */
-private fun resolveSketchName(context: android.content.Context, uri: android.net.Uri): String {
-    val cursor = context.contentResolver.query(uri, null, null, null, null)
-    cursor?.use {
-        val idx = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-        if (idx >= 0 && it.moveToFirst()) {
-            val name = it.getString(idx)
-            if (!name.isNullOrBlank()) return name
-        }
-    }
-    return uri.lastPathSegment?.substringAfterLast('/') ?: "sketch.ino"
-}
-
-/**
- * Copies the SAF-picked sketch (either a single-file `.ino` Uri or a tree
- * Uri from [ActivityResultContracts.OpenDocumentTree]) into the app's
- * private sketches dir and returns the primary `.ino` file to feed the
- * compile pipeline.
- *
- * Tree copies preserve layout: sibling `.cpp/.h`, a nested `src/` directory,
- * etc. all land next to the primary `.ino` so [SketchBuilder]'s multi-file
- * scan picks them up. The primary `.ino` is resolved by matching the folder
- * basename (Arduino convention: `Blink/Blink.ino`), falling back to the
- * first `.ino` alphabetically if no match.
- *
- * Non-`.ino` single-file picks are accepted — the user may paste a `.cpp`
- * or forget the extension — but we always name the on-disk copy with
- * `.ino` so `preprocessSketch` recognises it.
- */
-private fun materializeSketch(
-    context: android.content.Context,
-    uri: android.net.Uri,
-    displayName: String,
-): File? = runCatching {
-    val isTree = android.provider.DocumentsContract.isTreeUri(uri)
-    if (isTree) materializeTree(context, uri, displayName)
-    else materializeSingle(context, uri, displayName)
-}.getOrNull()
-
-private fun materializeSingle(
-    context: android.content.Context,
-    uri: android.net.Uri,
-    displayName: String,
-): File? {
-    val baseRaw = displayName.substringBeforeLast('.', displayName).ifBlank { "sketch" }
-    val slug = slugify(baseRaw)
-    val dir = File(context.filesDir, "sketches/$slug").apply {
-        deleteRecursively()
-        mkdirs()
-    }
-    val out = File(dir, "$slug.ino")
-    context.contentResolver.openInputStream(uri)?.use { input ->
-        out.outputStream().use { input.copyTo(it) }
-    } ?: return null
-    return out
-}
-
-private fun materializeTree(
-    context: android.content.Context,
-    tree: android.net.Uri,
-    displayName: String,
-): File? {
-    val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, tree) ?: return null
-    val folderName = doc.name ?: displayName.ifBlank { "sketch" }
-    val slug = slugify(folderName)
-    val dir = File(context.filesDir, "sketches/$slug").apply {
-        deleteRecursively()
-        mkdirs()
-    }
-    copyDocTree(context, doc, dir)
-
-    val inos = dir.listFiles()
-        ?.filter { it.isFile && it.extension.equals("ino", ignoreCase = true) }
-        ?.sortedBy { it.name }
-        .orEmpty()
-    if (inos.isEmpty()) return null
-
-    // Arduino convention: sketch folder and primary .ino share a name.
-    // Match case-insensitively since SAF display names are user-controlled.
-    val primary = inos.firstOrNull { it.nameWithoutExtension.equals(folderName, ignoreCase = true) }
-        ?: inos.first()
-    return primary
-}
-
-private fun copyDocTree(
-    context: android.content.Context,
-    from: androidx.documentfile.provider.DocumentFile,
-    to: File,
-) {
-    for (child in from.listFiles()) {
-        val childName = child.name ?: continue
-        val target = File(to, childName)
-        if (child.isDirectory) {
-            target.mkdirs()
-            copyDocTree(context, child, target)
-        } else {
-            runCatching {
-                context.contentResolver.openInputStream(child.uri)?.use { input ->
-                    target.outputStream().use { input.copyTo(it) }
-                }
-            }
-        }
-    }
-}
-
-private fun slugify(name: String): String =
-    name.lowercase().replace(Regex("[^a-z0-9_]+"), "_").trim('_').ifBlank { "sketch" }

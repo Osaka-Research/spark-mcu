@@ -135,19 +135,55 @@ tasks.register("extractS3Toolchain") {
     onlyIf { tarball.exists() && tarball.length() >= 1024 }
     inputs.file(tarball).optional()
     outputs.file(stamp)
+    outputs.file(File(toolchainJniLibsDir, "libc++_shared.so"))
     outputs.dir(File(toolchainAssetsDir, "xtensa-esp32s3-elf"))
     outputs.dir(File(toolchainAssetsDir, "arduino-core-esp32"))
     doLast {
         val stage = File(toolchainCacheDir, "stage-s3").apply {
             deleteRecursively(); mkdirs()
         }
-        exec { commandLine("tar", "-xJf", tarball.absolutePath, "-C", stage.absolutePath) }
+        // Android app-private storage rejects hard links. The cached GCC
+        // archive has a few alias entries, so extract their targets and copy
+        // the aliases as ordinary files after tar finishes.
+        val hardLinkAliases = mapOf(
+            "bin/xtensa-esp32s3-elf-gcc-13.2.0" to "bin/xtensa-esp32s3-elf-gcc",
+            "bin/xtensa-esp32s3-elf-ld" to "bin/xtensa-esp32s3-elf-ld.bfd",
+            "bin/xtensa-esp32s3-elf-c++" to "bin/xtensa-esp32s3-elf-g++",
+            "xtensa-esp32s3-elf/lib/libg.a" to "xtensa-esp32s3-elf/lib/libc.a",
+            "xtensa-esp32s3-elf/bin/ld" to "xtensa-esp32s3-elf/bin/ld.bfd",
+        )
+        exec {
+            commandLine(
+                listOf("tar") + hardLinkAliases.keys.map { "--exclude=$it" } +
+                    listOf("-xJf", tarball.absolutePath, "-C", stage.absolutePath)
+            )
+        }
+        hardLinkAliases.forEach { (alias, original) ->
+            val source = File(stage, original)
+            if (source.isFile) {
+                val destination = File(stage, alias)
+                destination.parentFile?.mkdirs()
+                source.copyTo(destination, overwrite = true)
+                destination.setExecutable(source.canExecute())
+            }
+        }
         val target = "xtensa-esp32s3-elf"
         val binDir = File(stage, "bin")
         val targetDir = File(stage, target)
         val coreDir = File(stage, "arduino-core-esp32")
         if (!binDir.isDirectory || !targetDir.isDirectory || !coreDir.isDirectory) {
             throw GradleException("S3 tarball needs bin/, $target/, and arduino-core-esp32/ at root")
+        }
+        val gcc = File(binDir, "$target-gcc")
+        val elfHeader = gcc.inputStream().use { it.readNBytes(20) }
+        val isPie = elfHeader.size >= 20 &&
+            elfHeader[0] == 0x7f.toByte() &&
+            elfHeader[1] == 'E'.code.toByte() &&
+            elfHeader[2] == 'L'.code.toByte() &&
+            elfHeader[3] == 'F'.code.toByte() &&
+            elfHeader[16] == 3.toByte() && elfHeader[17] == 0.toByte()
+        if (!isPie) {
+            throw GradleException("S3 toolchain gcc is not an Android-compatible PIE executable; rebuild the archive with -fPIE -pie")
         }
         binDir.listFiles()?.filter { it.isFile }?.forEach { bin ->
             val helper = bin.name in setOf("as", "ld", "cc1", "cc1plus", "collect2")
@@ -156,8 +192,8 @@ tasks.register("extractS3Toolchain") {
             dest.setExecutable(true)
         }
         val helperSources = listOf(
-            File(stage, "$target/bin/as") to "as",
-            File(stage, "$target/bin/ld") to "ld",
+            File(binDir, "$target-as") to "as",
+            File(binDir, "$target-ld.bfd") to "ld",
             File(stage, "libexec/gcc/$target/13.2.0/cc1") to "cc1",
             File(stage, "libexec/gcc/$target/13.2.0/cc1plus") to "cc1plus",
             File(stage, "libexec/gcc/$target/13.2.0/collect2") to "collect2",
@@ -169,8 +205,20 @@ tasks.register("extractS3Toolchain") {
                 if (name in setOf("lto1", "lto-wrapper")) return@forEach
                 throw GradleException("S3 toolchain missing helper: ${src.absolutePath}")
             }
+            val header = src.inputStream().use { it.readNBytes(20) }
+            if (header.size < 20 || header[18] != 183.toByte() || header[19] != 0.toByte()) {
+                throw GradleException("S3 helper $name is not an Android arm64 executable: ${src.absolutePath}")
+            }
             src.copyTo(File(toolchainJniLibsDir, "libs3_$name.so"), overwrite = true)
         }
+        val libcxx = File(stage, "libc++_shared.so").takeIf { it.isFile }
+            ?: (project.findProperty("spark.s3.libcxx.path") as String?)
+                ?.let(::File)?.takeIf { it.isFile }
+            ?: throw GradleException(
+                "S3 toolchain needs libc++_shared.so. Use an updated toolchain archive " +
+                    "or set -Pspark.s3.libcxx.path=/path/to/NDK/libc++_shared.so"
+            )
+        libcxx.copyTo(File(toolchainJniLibsDir, "libc++_shared.so"), overwrite = true)
         val assets = File(toolchainAssetsDir, target)
         assets.deleteRecursively()
         targetDir.copyRecursively(assets, overwrite = true)

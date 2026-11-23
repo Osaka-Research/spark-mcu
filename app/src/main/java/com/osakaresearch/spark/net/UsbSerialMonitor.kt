@@ -85,7 +85,7 @@ object UsbSerialMonitor {
         return try {
             port.open(connection)
             port.setParameters(baud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            port.purgeHwBuffers(true, true)
+            try { port.purgeHwBuffers(true, true) } catch (_: UnsupportedOperationException) {}
             currentPort = port
             readerJob = scope.launch { readLoop(port) }
             _state.value = State.Running(
@@ -147,8 +147,10 @@ object UsbSerialMonitor {
         manager: UsbManager,
         device: android.hardware.usb.UsbDevice,
     ): Boolean = suspendCancellableCoroutine { cont: CancellableContinuation<Boolean> ->
+        // UsbManager adds EXTRA_DEVICE and EXTRA_PERMISSION_GRANTED to this
+        // callback. An immutable PendingIntent discards those extras.
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-            PendingIntent.FLAG_IMMUTABLE else 0
+            PendingIntent.FLAG_MUTABLE else 0
         val intent = PendingIntent.getBroadcast(
             context, 0, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
         )

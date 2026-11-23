@@ -23,10 +23,12 @@ object S3SketchBuilder {
             val binDir = Toolchain.binDir(ctx, target)
             val gcc = Toolchain.bin(ctx, "${target.toolchainTriple}-gcc", target)
             val gpp = Toolchain.bin(ctx, "${target.toolchainTriple}-g++", target)
+            val sysroot = Toolchain.sysroot(ctx, target)
+            val gccLib = File(sysroot, "lib/gcc/${target.toolchainTriple}/13.2.0")
             val core = Toolchain.coreDir(ctx, target)
             val sdk = File(core, "sdk")
             val coreA = File(core, "prebuilt/core.a")
-            listOf(gcc, gpp, coreA, File(sdk, "flags/ld_libs")).forEach {
+            listOf(gcc, gpp, coreA, File(sdk, "flags/ld_libs"), File(gccLib, "include/stdbool.h")).forEach {
                 require(it.isFile) { "ESP32-S3 asset missing: ${it.absolutePath}" }
             }
             val work = File(ctx.filesDir, "build/sketch-s3").apply {
@@ -48,6 +50,12 @@ object S3SketchBuilder {
                 "-DARDUINO_USB_DFU_ON_BOOT=0",
             )
             val includes = buildList {
+                // GCC was built for an /opt prefix. Its real headers live in
+                // the APK assets after extraction, so supply those paths here.
+                add("-isystem"); add(File(gccLib, "include").absolutePath)
+                add("-isystem"); add(File(sysroot, "include/c++/13.2.0").absolutePath)
+                add("-isystem"); add(File(sysroot, "include/c++/13.2.0/${target.toolchainTriple}").absolutePath)
+                add("-isystem"); add(File(sysroot, "include").absolutePath)
                 add("-I${core.absolutePath}/cores/esp32")
                 add("-I${core.absolutePath}/variants/esp32s3")
                 sketch.extraIncludeDirs.forEach { add("-I${it.absolutePath}") }
@@ -69,6 +77,7 @@ object S3SketchBuilder {
                 val cmd = buildList {
                     add(compiler.absolutePath)
                     add("-B"); add(binDir.absolutePath + "/")
+                    add("--sysroot=${sysroot.absolutePath}")
                     add("@${File(sdk, "flags/$flagsFile").absolutePath}")
                     add("-Os"); add("-Werror=return-type")
                     addAll(defines)
@@ -93,11 +102,18 @@ object S3SketchBuilder {
             val link = buildList {
                 add(gpp.absolutePath)
                 add("-B"); add(binDir.absolutePath + "/")
+                add("-B"); add(gccLib.absolutePath + "/")
+                add("--sysroot=${sysroot.absolutePath}")
+                // ESP-IDF supplies startup code and standard libraries in the
+                // prebuilt SDK. The generic newlib crt0.o is not part of it.
+                add("-nostdlib")
                 add("@${File(sdk, "flags/ld_flags").absolutePath}")
                 add("@${File(sdk, "flags/ld_scripts").absolutePath}")
                 add("-Wl,--Map=${File(work, "sketch.map").absolutePath}")
                 add("-L${File(sdk, "lib").absolutePath}")
                 add("-L${File(sdk, "ld").absolutePath}")
+                add("-L${gccLib.absolutePath}")
+                add("-L${File(sysroot, "lib").absolutePath}")
                 val memory = File(sdk, "qio_qspi")
                 if (memory.isDirectory) add("-L${memory.absolutePath}")
                 add("-Wl,--wrap=esp_panic_handler")

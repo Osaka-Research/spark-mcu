@@ -70,7 +70,7 @@ class McpTools(private val bridge: McpBridge) {
 
         tool(
             name = "flash_firmware",
-            description = "Flash firmware via USB-OTG. Pass either a buildId from compile_sketch, or an inline bin (base64). Opens the ROM bootloader, writes, resets. Default offset 0x0, default target esp8266-nodemcu.",
+            description = "Flash firmware via USB-OTG. An ESP32-S3 buildId automatically flashes the bundled bootloader, partitions, boot_app0, and compiled app. For an inline bin, supply its flash offset. Default target: esp8266-nodemcu.",
             schema = """
               {"type":"object",
                "properties":{
