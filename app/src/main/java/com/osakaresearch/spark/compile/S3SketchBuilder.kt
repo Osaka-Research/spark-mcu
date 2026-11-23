@@ -39,7 +39,8 @@ object S3SketchBuilder {
             val sketch = SketchBuilder.preprocessSketch(inoFile, work)
             log("preprocess: ${sketch.inoCount} .ino file(s), ${sketch.extraSources.size} sibling source(s)")
             val libs = LibraryResolver.resolve(
-                listOf(sketch.mergedIno) + sketch.extraSources, core
+                listOf(sketch.mergedIno) + sketch.extraSources, core,
+                listOf(ArduinoLibraryManager.libraryRoot(ctx))
             ) { log(it) }
 
             val defines = listOf(

@@ -3,6 +3,9 @@ package com.osakaresearch.spark.compile
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.osakaresearch.spark.ai.SparkDeviceContext
 import java.io.File
 
 /**
@@ -20,6 +23,7 @@ import java.io.File
  * fresh install or a toolchain bump.
  */
 object SketchBuilder {
+    private val buildMutex = Mutex()
 
     sealed class Result {
         data class Ok(val output: File, val elf: File, val log: String) : Result()
@@ -33,6 +37,24 @@ object SketchBuilder {
      * minutes (core.a build); subsequent calls are fast.
      */
     suspend fun buildSketch(
+        ctx: Context,
+        inoFile: File,
+        target: McuTarget = McuTarget.Default,
+        onLog: (String) -> Unit = {},
+    ): Result = buildMutex.withLock {
+        val result = buildSketchInternal(ctx, inoFile, target, onLog)
+        SparkDeviceContext.recordOperation("compile", target.id, result is Result.Ok,
+            when (result) { is Result.Ok -> "Compiled ${inoFile.name}"; is Result.Fail -> result.reason },
+            when (result) { is Result.Ok -> result.log; is Result.Fail -> result.log })
+        if (result is Result.Ok) {
+            withContext(Dispatchers.IO) {
+                val artifact = BuildArtifacts.save(ctx, result, target, inoFile)
+                result.copy(output = artifact.bin, elf = File(artifact.bin.parentFile, "${artifact.id}.elf"))
+            }
+        } else result
+    }
+
+    private suspend fun buildSketchInternal(
         ctx: Context,
         inoFile: File,
         target: McuTarget = McuTarget.Default,
@@ -86,7 +108,9 @@ object SketchBuilder {
                 add(sketch.mergedIno)
                 addAll(sketch.extraSources)
             }
-            val libs = LibraryResolver.resolve(libSeedFiles, core) { log("  $it") }
+            val libs = LibraryResolver.resolve(
+                libSeedFiles, core, listOf(ArduinoLibraryManager.libraryRoot(ctx))
+            ) { log("  $it") }
             if (libs.sources.isNotEmpty()) {
                 log("libraries: ${libs.includeDirs.size} dir(s), ${libs.sources.size} src(s)")
             }

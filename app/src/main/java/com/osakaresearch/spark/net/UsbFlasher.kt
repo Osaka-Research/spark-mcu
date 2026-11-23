@@ -12,6 +12,9 @@ import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.osakaresearch.spark.compile.McuTarget
+import com.osakaresearch.spark.ai.SparkDeviceContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -34,6 +37,7 @@ data class UsbDeviceInfo(
     val vendorId: Int,
     val productId: Int,
     val hasPermission: Boolean,
+    val deviceKey: String,
 )
 
 /** One blob in a multi-image flash plan (e.g. bootloader + partitions + app). */
@@ -48,6 +52,7 @@ data class FlashBlob(val name: String, val offset: Int, val data: ByteArray) {
 }
 
 object UsbFlasher {
+    internal val operationMutex = Mutex()
     private const val ACTION_USB_PERMISSION = "com.osakaresearch.spark.USB_PERMISSION"
 
     private const val BAUD = 115200
@@ -77,12 +82,22 @@ object UsbFlasher {
                 vendorId = dev.vendorId,
                 productId = dev.productId,
                 hasPermission = manager.hasPermission(dev),
+                deviceKey = "${dev.deviceName}:${dev.deviceId}:${dev.vendorId}:${dev.productId}",
             )
         }
     }
 
     /** Query the ROM instead of guessing the chip from a shared USB adapter ID. */
-    suspend fun detectChip(context: Context, manualBoot: Boolean = false): ChipDetection =
+    suspend fun detectChip(context: Context, manualBoot: Boolean = false): ChipDetection = operationMutex.withLock {
+        val devices = listDevices(context)
+        if (devices.size != 1) return@withLock ChipDetection.Fail("Connect exactly one supported USB serial board before detecting the chip")
+        UsbSerialMonitor.stop()
+        val result = detectChipInternal(context, manualBoot)
+        SparkDeviceContext.recordDetection(context, devices.single().deviceKey, result)
+        result
+    }
+
+    private suspend fun detectChipInternal(context: Context, manualBoot: Boolean): ChipDetection =
         withContext(Dispatchers.IO) {
             val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
             val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager).firstOrNull()
@@ -149,6 +164,7 @@ object UsbFlasher {
         onLog: (String) -> Unit,
         manualBoot: Boolean = false,
         target: McuTarget = McuTarget.Default,
+        expectedDeviceKey: String? = null,
     ): FlashResult = withContext(Dispatchers.IO) {
         val data = runCatching { readAll(context, firmwareUri) }.getOrElse {
             return@withContext FlashResult.Fail("cannot read firmware: ${it.message}")
@@ -161,6 +177,7 @@ object UsbFlasher {
             onLog = onLog,
             manualBoot = manualBoot,
             target = target,
+            expectedDeviceKey = expectedDeviceKey,
         )
     }
 
@@ -181,12 +198,35 @@ object UsbFlasher {
         onLog: (String) -> Unit,
         manualBoot: Boolean = false,
         target: McuTarget = McuTarget.Default,
+        expectedDeviceKey: String? = null,
+    ): FlashResult = operationMutex.withLock {
+        if (listDevices(context).size != 1) return@withLock FlashResult.Fail("Connect exactly one USB serial board before flashing")
+        UsbSerialMonitor.stop()
+        val result = flashPlanInternal(context, plan, onProgress, onLog, manualBoot, target, expectedDeviceKey)
+        SparkDeviceContext.recordOperation("flash", target.id, result is FlashResult.Ok,
+            when (result) { is FlashResult.Ok -> "Wrote ${result.bytes} bytes; runtime behavior is not yet verified"
+                is FlashResult.Fail -> result.reason })
+        result
+    }
+
+    private suspend fun flashPlanInternal(
+        context: Context,
+        plan: List<FlashBlob>,
+        onProgress: (Long, Long) -> Unit,
+        onLog: (String) -> Unit,
+        manualBoot: Boolean = false,
+        target: McuTarget = McuTarget.Default,
+        expectedDeviceKey: String? = null,
     ): FlashResult = withContext(Dispatchers.IO) {
         if (plan.isEmpty()) return@withContext FlashResult.Fail("empty flash plan")
 
         val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager).firstOrNull()
             ?: return@withContext FlashResult.Fail("no USB serial device found")
+        val actualDeviceKey = "${driver.device.deviceName}:${driver.device.deviceId}:${driver.device.vendorId}:${driver.device.productId}"
+        if (expectedDeviceKey != null && actualDeviceKey != expectedDeviceKey) {
+            return@withContext FlashResult.Fail("USB board changed after confirmation; inspect and confirm the new connection")
+        }
         onLog("device: ${chipName(driver)} ${hex4(driver.device.vendorId)}:${hex4(driver.device.productId)}")
 
         if (!manager.hasPermission(driver.device)) {
@@ -323,14 +363,21 @@ object UsbFlasher {
     ): Boolean = suspendCancellableCoroutine { cont: CancellableContinuation<Boolean> ->
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             PendingIntent.FLAG_IMMUTABLE else 0
-        val intent = PendingIntent.getBroadcast(
-            context, 0, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
-        )
+        val device = driver.device
+        // PendingIntent identity excludes extras. Give each USB device its own
+        // identity so a cached request cannot deliver a stale grant result.
+        val permissionIntent = Intent(ACTION_USB_PERMISSION)
+            .setPackage(context.packageName)
+            .setData(android.net.Uri.parse("spark-usb://permission/${device.deviceId}/${device.vendorId}/${device.productId}"))
+        val intent = PendingIntent.getBroadcast(context, device.deviceId, permissionIntent, flags)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, i: Intent) {
                 if (i.action != ACTION_USB_PERMISSION) return
                 try { ctx.unregisterReceiver(this) } catch (_: Throwable) {}
-                val ok = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                // The manager state is authoritative; some Android builds omit
+                // or misreport the result extra despite having granted access.
+                val ok = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) ||
+                    manager.hasPermission(device)
                 if (cont.isActive) cont.resumeWith(Result.success(ok))
             }
         }
@@ -341,7 +388,7 @@ object UsbFlasher {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             context.registerReceiver(receiver, filter)
         }
-        manager.requestPermission(driver.device, intent)
+        manager.requestPermission(device, intent)
         cont.invokeOnCancellation {
             try { context.unregisterReceiver(receiver) } catch (_: Throwable) {}
         }

@@ -92,7 +92,16 @@ fun FirmwareScreen() {
     var detectingChip by remember { mutableStateOf(false) }
     var sketchUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var sketchName by remember { mutableStateOf("") }
-    var target by remember { mutableStateOf(McuTarget.Default) }
+    val sharedTarget by com.osakaresearch.spark.ai.SparkDeviceContext.selectedTarget.collectAsState()
+    var target by remember { mutableStateOf(sharedTarget) }
+    LaunchedEffect(sharedTarget, building, uploading) {
+        if (!building && !uploading && target != sharedTarget) {
+            target = sharedTarget
+            compiledS3Selected = false
+            selectedUri = null; selectedName = ""
+            offsetHex = if (target == McuTarget.ESP32_S3) "0x10000" else "0x0"
+        }
+    }
     var blinkFolderUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var blinkFolderName by remember { mutableStateOf("") }
 
@@ -218,6 +227,7 @@ fun FirmwareScreen() {
                     onClick = {
                         if (!building && !uploading && target != t) {
                             target = t
+                            com.osakaresearch.spark.ai.SparkDeviceContext.selectTarget(context, t)
                             compiledS3Selected = false
                             offsetHex = if (t == McuTarget.ESP32_S3) "0x10000" else "0x0"
                         }

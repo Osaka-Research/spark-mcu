@@ -1,5 +1,7 @@
 package com.osakaresearch.spark.ui
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -48,15 +50,18 @@ private val BAUDS = listOf(74880, 115200, 9600, 57600, 230400)
 
 @Composable
 fun MonitorScreen() {
-    var lines by remember { mutableStateOf(listOf("spark monitor ready. pick a baud, tap Start, tap RST on the board.")) }
+    var lines by remember { mutableStateOf(UsbSerialMonitor.history.tail(200).lines.ifEmpty { listOf("Monitor ready. Spark can open this port and change baud from the AI tab.") }) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var baud by remember { mutableStateOf(74880) }
+    var baud by remember { mutableStateOf(115200) }
     val monitorState by UsbSerialMonitor.state.collectAsState()
     val isRunning = monitorState is UsbSerialMonitor.State.Running
+    LaunchedEffect(monitorState) {
+        (monitorState as? UsbSerialMonitor.State.Running)?.let { baud = it.baud }
+    }
 
     LaunchedEffect(Unit) {
         SparkClient.incoming.collect { msg ->
@@ -88,7 +93,7 @@ fun MonitorScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("baud", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (b in BAUDS) {
                     FilterChip(
                         selected = baud == b,
@@ -124,6 +129,7 @@ fun MonitorScreen() {
             ) { Text(if (isRunning) "Stop" else "Start") }
             OutlinedButton(
                 onClick = {
+                    UsbSerialMonitor.history.clear()
                     lines = listOf("── cleared ──")
                 },
                 modifier = Modifier.weight(1f),
